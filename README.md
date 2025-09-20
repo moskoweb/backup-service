@@ -62,7 +62,9 @@ sudo apt install percona-xtrabackup-80 -y
 sudo apt install mydumper -y
 
 # AWS CLI (para ambos os modos)
-sudo apt install awscli -y
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
 ```
 
 ### Configuração do MySQL
@@ -105,7 +107,7 @@ AWS_ACCESS_KEY_ID=sua_access_key
 AWS_SECRET_ACCESS_KEY=sua_secret_key
 
 # Configurações opcionais
-BACKUP_RETENTION_DAYS=30
+RETENTION_DAYS=30
 WEBHOOK_URL=https://hooks.slack.com/services/...
 WEBHOOK_EVENTS=success,error
 ```
@@ -117,7 +119,7 @@ WEBHOOK_EVENTS=success,error
 BACKUP_MODE=local
 DB_HOST=prod-mysql.empresa.com
 DB_NAME=producao_db
-BACKUP_RETENTION_DAYS=90
+RETENTION_DAYS=90
 WEBHOOK_EVENTS=success,error,cleanup
 ```
 
@@ -126,8 +128,7 @@ WEBHOOK_EVENTS=success,error,cleanup
 BACKUP_MODE=remote
 DB_HOST=dev-mysql.empresa.com
 DB_NAME=desenvolvimento_db
-BACKUP_RETENTION_DAYS=7
-MYDUMPER_THREADS=2
+RETENTION_DAYS=7
 ```
 
 #### Análise de Dados (Backup Seletivo)
@@ -135,7 +136,6 @@ MYDUMPER_THREADS=2
 BACKUP_MODE=remote
 DB_HOST=analytics-mysql.empresa.com
 DB_NAME=analytics_db
-MYDUMPER_PARAMS="--where='created_at >= CURDATE() - INTERVAL 30 DAY'"
 ```
 
 ## 🚀 Uso

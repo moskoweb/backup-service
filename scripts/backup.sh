@@ -80,7 +80,6 @@ backup_with_mydumper() {
     mydumper_cmd+=" --events"
     mydumper_cmd+=" --routines"
     mydumper_cmd+=" --triggers"
-    mydumper_cmd+=" --single-transaction"
     mydumper_cmd+=" --long-query-guard=3600"
     mydumper_cmd+=" --kill-long-queries"
     
