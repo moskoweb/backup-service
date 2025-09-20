@@ -1,66 +1,57 @@
-# 🔐 Percona Backup & Restore System for Cloudflare R2 (S3-Compatible)
+# MySQL Backup para Cloudflare R2 com Percona XtraBackup
 
-## 📁 Estrutura
+## 📦 Estrutura
+- `.env`: configurações gerais
+- `scripts/backup.sh`: realiza o backup (full ou incremental)
+- `scripts/restore.sh`: restaura um backup
+- `scripts/cleanup.sh`: limpa backups antigos (retenção)
 
-- `.env`: Definições das variáveis de ambiente (credenciais, pasta, webhook etc)
-- `scripts/backup.sh`: Faz o backup (full ou incremental)
-- `scripts/restore.sh`: Restaura um backup informado
-- `scripts/cleanup_old_backups.sh`: Limpa backups antigos do R2
-
-## 🚀 Como Usar
-
-### 1. Configurar `.env`
-
-Copie o modelo `.env` e preencha com seus dados:
-
+## 🔧 Instalação
+### Requisitos
 ```bash
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
-S3_BUCKET=...
-R2_FOLDER=DB-Backup
-DB_USER=...
-DB_PASSWORD=...
-WEBHOOK_URL=https://...
-WEBHOOK_EVENTS=success,error,restore,cleanup
+sudo apt update
+wget https://repo.percona.com/apt/percona-release_latest.generic_all.deb
+sudo dpkg -i percona-release_latest.generic_all.deb
+sudo percona-release setup ps80
+sudo apt update
+sudo apt install percona-xtrabackup-80 awscli -y
 ```
 
-### 2. Executar backup manualmente
+## ⚙️ Configuração
+1. Edite o `.env` com os dados do banco e do Cloudflare R2.
+2. Crie um usuário com permissões para backup no MySQL.
 
+## 🚀 Uso
+### Backup (automático: full no domingo, incremental nos demais)
 ```bash
-./scripts/backup.sh full         # ou incremental
+./scripts/backup.sh
 ```
 
-Ou deixe o script decidir:
-
+### Backup explícito:
 ```bash
-./scripts/backup.sh              # full aos domingos, incremental nos outros dias
+./scripts/backup.sh full
+./scripts/backup.sh incremental
 ```
 
-### 3. Restaurar backup
-
+### Restauração
 ```bash
 ./scripts/restore.sh 2025-09-20-full.tar.gz
 ```
 
-### 4. Limpar backups antigos
-
+### Limpeza (retenção de 30 dias)
 ```bash
-./scripts/cleanup_old_backups.sh
+./scripts/cleanup.sh
 ```
 
-## ⏱️ Agendamentos
+## 🔔 Webhooks
+Configure `WEBHOOK_URL` e `WEBHOOK_EVENTS` no `.env` para receber eventos de:
+- `success`, `error`, `restore`, `cleanup`
 
-Use `crontab -e`:
-
+## 🗓️ Agendamento (Cron)
 ```bash
-# Backup diário às 01h
-0 1 * * * /caminho/scripts/backup.sh >> /var/log/db-backup.log 2>&1
+# Backup diário às 2h
+0 2 * * * /caminho/para/scripts/backup.sh >> /var/log/backup.log 2>&1
 
-# Limpeza semanal (domingo às 03h)
-0 3 * * 0 /caminho/scripts/cleanup_old_backups.sh >> /var/log/db-cleanup.log 2>&1
+# Cleanup semanal
+0 3 * * 0 /caminho/para/scripts/cleanup.sh >> /var/log/cleanup.log 2>&1
 ```
-
----
-
-Backups organizados, restauráveis e automatizados via webhook. Seguro, portátil e sem depender de disco local!
-
