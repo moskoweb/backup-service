@@ -12,7 +12,8 @@ mkdir -p "$CHECKPOINT_DIR"
 save_checkpoint() {
     local step="$1"
     local data="$2"
-    local checkpoint_file="$CHECKPOINT_DIR/backup-$(date +%F)-$step.checkpoint"
+    # Usa a data do backup atual para manter consistência
+    local checkpoint_file="$CHECKPOINT_DIR/backup-$DATE-$step.checkpoint"
     
     echo "timestamp=$(date -Iseconds)" > "$checkpoint_file"
     echo "step=$step" >> "$checkpoint_file"
@@ -32,7 +33,8 @@ save_checkpoint() {
 # Função para verificar se checkpoint existe
 check_checkpoint() {
     local step="$1"
-    local checkpoint_file="$CHECKPOINT_DIR/backup-$(date +%F)-$step.checkpoint"
+    # Usa a data do backup atual para manter consistência
+    local checkpoint_file="$CHECKPOINT_DIR/backup-$DATE-$step.checkpoint"
     
     if [[ -f "$checkpoint_file" ]]; then
         # Carrega variáveis do checkpoint
@@ -48,7 +50,7 @@ cleanup_checkpoints() {
     
     if [[ "$success" == "true" ]]; then
         # Remove checkpoints do dia atual em caso de sucesso
-        rm -f "$CHECKPOINT_DIR/backup-$(date +%F)-"*.checkpoint
+        rm -f "$CHECKPOINT_DIR/backup-$DATE-"*.checkpoint
         echo "✓ Checkpoints limpos após sucesso"
     fi
     
@@ -230,7 +232,7 @@ execute_compression() {
     
     echo "=== ETAPA: COMPACTAÇÃO ==="
     
-    # Verifica checkpoint
+    # Verifica checkpoint de compressão
     if check_checkpoint "$step_name"; then
         echo "✓ Compactação já concluída, verificando arquivo..."
         if validate_file "$ARCHIVE_PATH" 1048576; then
@@ -239,6 +241,11 @@ execute_compression() {
         else
             echo "⚠ Checkpoint encontrado mas arquivo inválido, refazendo compactação..."
         fi
+    fi
+    
+    # Verifica se existe checkpoint de database e carrega as informações
+    if check_checkpoint "database_backup"; then
+        echo "Usando diretório de backup: $TMP_DIR"
     fi
     
     # Verifica se diretório de backup existe
@@ -272,7 +279,7 @@ execute_upload() {
     
     echo "=== ETAPA: UPLOAD PARA R2 ==="
     
-    # Verifica checkpoint
+    # Verifica checkpoint de upload
     if check_checkpoint "$step_name"; then
         echo "✓ Upload já concluído anteriormente"
         echo "Verificando se arquivo ainda existe no R2..."
@@ -283,6 +290,13 @@ execute_upload() {
         else
             echo "⚠ Checkpoint encontrado mas arquivo não está no R2, refazendo upload..."
         fi
+    fi
+    
+    # Verifica se existe checkpoint de compressão e carrega as informações
+    if check_checkpoint "compression"; then
+        echo "Usando arquivo de backup: $ARCHIVE_PATH"
+    elif check_checkpoint "database_backup"; then
+        echo "Usando arquivo de backup: $ARCHIVE_PATH"
     fi
     
     # Verifica se arquivo compactado existe
@@ -384,7 +398,8 @@ execute_incremental_backup() {
 }
 
 # Configurações de data e diretórios
-DATE=$(date +%F_%H-%M-%S)
+# Usa apenas a data (YYYY-MM-DD) para permitir múltiplas execuções no mesmo dia
+DATE=$(date +%Y-%m-%d)
 TMP_DIR="$TMP_BACKUP_PATH/db-backup-$DATE"
 mkdir -p "$TMP_DIR"
 
