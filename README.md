@@ -47,6 +47,10 @@ percona-backup-r2-package/
 ## 🔧 Instalação
 
 ### Requisitos do Sistema
+
+**Compatibilidade**: Linux (Ubuntu/Debian/CentOS) e macOS
+
+#### Linux (Ubuntu/Debian)
 ```bash
 # Atualizar sistema
 sudo apt update
@@ -65,6 +69,21 @@ sudo apt install mydumper -y
 curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
 unzip awscliv2.zip
 sudo ./aws/install
+```
+
+#### macOS
+```bash
+# Instalar Homebrew (se não tiver)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Para Modo Local (XtraBackup)
+brew install percona-xtrabackup
+
+# Para Modo Remoto (mydumper)
+brew install mydumper
+
+# AWS CLI (para ambos os modos)
+brew install awscli
 ```
 
 ### Configuração do MySQL

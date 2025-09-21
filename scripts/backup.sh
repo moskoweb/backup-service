@@ -272,9 +272,10 @@ echo "Backup executado com sucesso. Criando arquivo compactado..."
 # Compacta o backup com nível de compressão configurável
 COMPRESSION=${COMPRESSION_LEVEL:-6}
 echo "Compactando backup (nível de compressão: $COMPRESSION)..."
-tar -czf "$ARCHIVE_PATH" -C "$TMP_DIR" . --use-compress-program="gzip -$COMPRESSION"
+tar -cf - -C "$TMP_DIR" . | gzip -$COMPRESSION > "$ARCHIVE_PATH"
 
-if [[ $? -ne 0 ]]; then
+# Verifica se houve erro no tar ou no gzip
+if [[ ${PIPESTATUS[0]} -ne 0 || ${PIPESTATUS[1]} -ne 0 ]]; then
     echo "Erro: Falha ao criar arquivo compactado"
     rm -rf "$TMP_DIR"
     exit 1
