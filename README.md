@@ -8,9 +8,13 @@ Sistema inteligente de backup MySQL que suporta dois modos de operação: **loca
 - **Detecção Automática**: Sistema detecta automaticamente o melhor método baseado na configuração
 - **Backup Incremental Inteligente**: Suporte completo para backups incrementais no modo local
 - **Armazenamento em Nuvem**: Upload direto para Cloudflare R2 (compatível com S3)
+- **Sistema Modular**: Execução por etapas independentes com checkpoints automáticos
+- **Checkpoints Inteligentes**: Retomada automática de processos interrompidos
+- **Execução Granular**: Execute etapas específicas ou processo completo
 - **Webhooks**: Notificações em tempo real sobre status dos backups
 - **Retenção Automática**: Limpeza automática de backups antigos
 - **Configuração Flexível**: Diferentes configurações por ambiente
+- **Alta Confiabilidade**: Validações robustas e recuperação automática de falhas
 
 ## 📦 Estrutura do Projeto
 
@@ -43,6 +47,86 @@ percona-backup-r2-package/
   - Compatibilidade entre versões MySQL
   - Backup seletivo de tabelas
 - **Ideal para**: Análises, migrações, ambientes de desenvolvimento
+
+## ⚡ Sistema Modular e Checkpoints
+
+### 🔄 Execução Modular
+Todos os scripts principais (`backup.sh`, `restore.sh`, `cleanup.sh`) agora suportam execução modular por etapas:
+
+#### 📦 Backup Modular
+```bash
+# Processo completo (padrão)
+./scripts/backup.sh
+
+# Etapas específicas
+./scripts/backup.sh --step backup      # Apenas backup do banco
+./scripts/backup.sh --step compression # Apenas compressão
+./scripts/backup.sh --step upload      # Apenas upload para R2
+
+# Para backups incrementais
+./scripts/backup.sh --step incremental # Backup incremental completo
+```
+
+#### 🔄 Restore Modular
+```bash
+# Processo completo (padrão)
+./scripts/restore.sh backup-file.tar.gz
+
+# Etapas específicas
+./scripts/restore.sh backup-file.tar.gz --step download  # Apenas download
+./scripts/restore.sh backup-file.tar.gz --step extract  # Apenas extração
+./scripts/restore.sh backup-file.tar.gz --step restore  # Apenas restore
+```
+
+#### 🧹 Cleanup Modular
+```bash
+# Processo completo (padrão)
+./scripts/cleanup.sh
+
+# Etapas específicas
+./scripts/cleanup.sh --step list    # Apenas listagem de arquivos
+./scripts/cleanup.sh --step delete  # Apenas remoção de arquivos antigos
+./scripts/cleanup.sh --step verify  # Apenas verificação final
+```
+
+### 🎯 Sistema de Checkpoints
+
+#### Como Funciona
+- **Checkpoints Diários**: Cada etapa é salva como checkpoint por dia
+- **Retomada Automática**: Etapas já concluídas são automaticamente puladas
+- **Validação Inteligente**: Verifica integridade antes de pular etapas
+- **Limpeza Automática**: Checkpoints antigos são removidos automaticamente
+
+#### Benefícios
+- **Eficiência**: Evita reexecução desnecessária de etapas
+- **Confiabilidade**: Permite retomar processos interrompidos
+- **Flexibilidade**: Execute apenas as etapas necessárias
+- **Debugging**: Facilita identificação de problemas específicos
+
+#### Exemplo Prático
+```bash
+# Dia 1: Processo interrompido na etapa de upload
+./scripts/backup.sh
+# ✓ Backup concluído
+# ✓ Compressão concluída  
+# ✗ Upload falhou (conexão perdida)
+
+# Dia 1: Reexecução - apenas upload será executado
+./scripts/backup.sh
+# ✓ Backup já concluído, pulando...
+# ✓ Compressão já concluída, pulando...
+# ⚡ Executando upload...
+# ✓ Upload concluído
+```
+
+### 📋 Ajuda e Documentação
+Todos os scripts incluem ajuda integrada:
+
+```bash
+./scripts/backup.sh --help
+./scripts/restore.sh --help
+./scripts/cleanup.sh --help
+```
 
 ## 🔧 Instalação
 
@@ -186,6 +270,11 @@ O sistema detecta automaticamente se deve fazer backup full ou incremental:
 
 # Forçar backup incremental (apenas modo local)
 ./scripts/backup.sh incremental
+
+# Executar apenas etapas específicas
+./scripts/backup.sh --step backup      # Só backup
+./scripts/backup.sh --step compression # Só compressão
+./scripts/backup.sh --step upload      # Só upload
 ```
 
 ### Restauração
@@ -195,6 +284,14 @@ O sistema detecta automaticamente se deve fazer backup full ou incremental:
 
 # Listar backups disponíveis
 ./scripts/restore.sh --list
+
+# Execução modular - etapas específicas
+./scripts/restore.sh backup.tar.gz --step download  # Só download
+./scripts/restore.sh backup.tar.gz --step extract  # Só extração
+./scripts/restore.sh backup.tar.gz --step restore  # Só restore
+
+# Ver opções disponíveis
+./scripts/restore.sh --help
 ```
 
 ### Limpeza de Backups Antigos
@@ -204,6 +301,36 @@ O sistema detecta automaticamente se deve fazer backup full ou incremental:
 
 # Limpeza com retenção específica (em dias)
 ./scripts/cleanup.sh 15
+
+# Execução modular - etapas específicas
+./scripts/cleanup.sh --step list    # Só listagem
+./scripts/cleanup.sh --step delete  # Só remoção
+./scripts/cleanup.sh --step verify  # Só verificação
+
+# Ver opções disponíveis
+./scripts/cleanup.sh --help
+```
+
+### 🔄 Recursos Avançados
+
+#### Retomada Automática
+```bash
+# Se um processo foi interrompido, simplesmente execute novamente
+# O sistema automaticamente detecta e retoma de onde parou
+./scripts/backup.sh   # Retoma automaticamente
+./scripts/restore.sh backup.tar.gz  # Retoma automaticamente
+./scripts/cleanup.sh  # Retoma automaticamente
+```
+
+#### Debugging e Monitoramento
+```bash
+# Verificar status de checkpoints
+ls -la /tmp/backup_checkpoints_$(date +%Y%m%d)/
+
+# Forçar limpeza de checkpoints (se necessário)
+rm -rf /tmp/backup_checkpoints_*
+rm -rf /tmp/restore_checkpoints_*
+rm -rf /tmp/cleanup_checkpoints_*
 ```
 
 ## 🔔 Webhooks e Notificações
@@ -295,6 +422,47 @@ aws configure list
 - Confirme que existe um backup full anterior
 - Verifique logs para erros do XtraBackup
 
+#### Problemas com Checkpoints
+```bash
+# Checkpoint corrompido ou inválido
+rm -rf /tmp/backup_checkpoints_$(date +%Y%m%d)
+./scripts/backup.sh  # Reinicia processo completo
+
+# Verificar integridade dos checkpoints
+ls -la /tmp/backup_checkpoints_$(date +%Y%m%d)/
+cat /tmp/backup_checkpoints_$(date +%Y%m%d)/backup_completed
+
+# Forçar execução de etapa específica (ignora checkpoint)
+rm /tmp/backup_checkpoints_$(date +%Y%m%d)/upload_completed
+./scripts/backup.sh --step upload
+```
+
+#### Processo Travado em Etapa Específica
+```bash
+# Identificar qual etapa está travada
+./scripts/backup.sh --help  # Ver etapas disponíveis
+
+# Executar etapa específica para debug
+./scripts/backup.sh --step backup
+./scripts/backup.sh --step compression
+./scripts/backup.sh --step upload
+
+# Para restore
+./scripts/restore.sh backup.tar.gz --step download
+./scripts/restore.sh backup.tar.gz --step extract
+./scripts/restore.sh backup.tar.gz --step restore
+```
+
+#### Falha na Validação de Arquivos
+```bash
+# Verificar integridade manualmente
+tar -tzf /tmp/backup.tar.gz > /dev/null && echo "Arquivo OK" || echo "Arquivo corrompido"
+
+# Recriar arquivo se necessário
+rm /tmp/backup_checkpoints_$(date +%Y%m%d)/compression_completed
+./scripts/backup.sh --step compression
+```
+
 ### Logs e Debug
 ```bash
 # Habilitar modo debug
@@ -303,19 +471,72 @@ export DEBUG=1
 
 # Verificar logs detalhados
 tail -f /tmp/backup_debug.log
+
+# Logs específicos por etapa
+tail -f /tmp/backup_backup.log
+tail -f /tmp/backup_compression.log
+tail -f /tmp/backup_upload.log
+
+# Verificar status de checkpoints
+find /tmp -name "*_checkpoints_*" -type d
+ls -la /tmp/backup_checkpoints_$(date +%Y%m%d)/
+```
+
+### 🔧 Comandos de Manutenção
+
+#### Limpeza de Checkpoints Antigos
+```bash
+# Limpeza automática (executada pelos scripts)
+find /tmp -name "*_checkpoints_*" -type d -mtime +7 -exec rm -rf {} \;
+
+# Limpeza manual de todos os checkpoints
+rm -rf /tmp/backup_checkpoints_*
+rm -rf /tmp/restore_checkpoints_*
+rm -rf /tmp/cleanup_checkpoints_*
+```
+
+#### Reset Completo do Sistema
+```bash
+# Para reiniciar completamente todos os processos
+rm -rf /tmp/backup_checkpoints_*
+rm -rf /tmp/restore_checkpoints_*
+rm -rf /tmp/cleanup_checkpoints_*
+rm -f /tmp/backup*.log
+rm -f /tmp/restore*.log
+rm -f /tmp/cleanup*.log
+
+echo "Sistema resetado - próxima execução será completa"
 ```
 
 ## 📊 Comparação de Performance
 
-| Aspecto | Modo Local (XtraBackup) | Modo Remoto (mydumper) |
-|---------|-------------------------|------------------------|
-| **Velocidade Backup** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| **Velocidade Restore** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ |
-| **Backup Incremental** | ✅ Nativo | ❌ Não suportado |
-| **Paralelização** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
-| **Compressão** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
-| **Flexibilidade** | ⭐⭐ | ⭐⭐⭐⭐⭐ |
-| **Compatibilidade** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| Aspecto | Modo Local (XtraBackup) | Modo Remoto (mydumper) | Sistema Modular |
+|---------|-------------------------|------------------------|-----------------|
+| **Velocidade Backup** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Velocidade Restore** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Backup Incremental** | ✅ Nativo | ❌ Não suportado | ✅ Suportado |
+| **Paralelização** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
+| **Compressão** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Flexibilidade** | ⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Compatibilidade** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Confiabilidade** | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Retomada Automática** | ❌ Não suportado | ❌ Não suportado | ✅ Checkpoints |
+| **Execução Granular** | ❌ Processo único | ❌ Processo único | ✅ Por etapas |
+| **Debugging** | ⭐⭐ | ⭐⭐ | ⭐⭐⭐⭐⭐ |
+
+### 🚀 Vantagens do Sistema Modular
+
+#### ✅ Benefícios Operacionais
+- **Retomada Inteligente**: Nunca perca progresso por falhas de rede ou sistema
+- **Execução Seletiva**: Execute apenas as etapas necessárias
+- **Debugging Facilitado**: Identifique problemas em etapas específicas
+- **Eficiência de Recursos**: Evite reprocessamento desnecessário
+
+#### ⚡ Cenários de Uso Otimizados
+- **Conexões Instáveis**: Checkpoints garantem continuidade
+- **Ambientes de Produção**: Menor impacto com execução granular
+- **Manutenção**: Facilita troubleshooting e correções
+- **Automação**: Integração perfeita com sistemas de monitoramento
 
 ## 🔒 Segurança
 

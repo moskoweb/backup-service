@@ -3,8 +3,119 @@
 # Carrega as variáveis de ambiente
 source "$(dirname "$0")/../.env"
 
-# Define o tipo de backup (full ou incremental)
-BACKUP_TYPE=$1
+# ===== FUNÇÕES DE CHECKPOINT =====
+# Diretório para armazenar checkpoints
+CHECKPOINT_DIR="$TMP_BACKUP_PATH/.checkpoints"
+mkdir -p "$CHECKPOINT_DIR"
+
+# Função para salvar checkpoint
+save_checkpoint() {
+    local step="$1"
+    local data="$2"
+    local checkpoint_file="$CHECKPOINT_DIR/backup-$(date +%F)-$step.checkpoint"
+    
+    echo "timestamp=$(date -Iseconds)" > "$checkpoint_file"
+    echo "step=$step" >> "$checkpoint_file"
+    echo "backup_type=$BACKUP_TYPE" >> "$checkpoint_file"
+    echo "date=$DATE" >> "$checkpoint_file"
+    echo "tmp_dir=$TMP_DIR" >> "$checkpoint_file"
+    echo "archive_path=$ARCHIVE_PATH" >> "$checkpoint_file"
+    echo "filename=$FILENAME" >> "$checkpoint_file"
+    
+    if [[ -n "$data" ]]; then
+        echo "data=$data" >> "$checkpoint_file"
+    fi
+    
+    echo "✓ Checkpoint salvo: $step"
+}
+
+# Função para verificar se checkpoint existe
+check_checkpoint() {
+    local step="$1"
+    local checkpoint_file="$CHECKPOINT_DIR/backup-$(date +%F)-$step.checkpoint"
+    
+    if [[ -f "$checkpoint_file" ]]; then
+        # Carrega variáveis do checkpoint
+        source "$checkpoint_file"
+        return 0
+    fi
+    return 1
+}
+
+# Função para limpar checkpoints antigos
+cleanup_checkpoints() {
+    local success="$1"
+    
+    if [[ "$success" == "true" ]]; then
+        # Remove checkpoints do dia atual em caso de sucesso
+        rm -f "$CHECKPOINT_DIR/backup-$(date +%F)-"*.checkpoint
+        echo "✓ Checkpoints limpos após sucesso"
+    fi
+    
+    # Remove checkpoints com mais de 7 dias
+    find "$CHECKPOINT_DIR" -name "*.checkpoint" -mtime +7 -delete 2>/dev/null
+}
+
+# Função para verificar se arquivo existe e tem tamanho válido
+validate_file() {
+    local file="$1"
+    local min_size="${2:-1024}"  # Tamanho mínimo padrão: 1KB
+    
+    if [[ -f "$file" ]] && [[ $(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null || echo 0) -gt $min_size ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# ===== SISTEMA DE PARÂMETROS =====
+# Uso: backup.sh [tipo_backup] [--step=etapa]
+# Etapas disponíveis: database, compression, upload, all
+# Exemplos:
+#   backup.sh full                    # Executa backup completo
+#   backup.sh full --step=database    # Executa apenas backup do banco
+#   backup.sh full --step=compression # Executa apenas compactação
+#   backup.sh full --step=upload      # Executa apenas upload
+
+# Processa parâmetros
+BACKUP_TYPE=""
+SPECIFIC_STEP=""
+
+for arg in "$@"; do
+    case $arg in
+        --step=*)
+            SPECIFIC_STEP="${arg#*=}"
+            shift
+            ;;
+        full|incremental)
+            BACKUP_TYPE="$arg"
+            shift
+            ;;
+        --help|-h)
+            echo "Uso: $0 [tipo_backup] [--step=etapa]"
+            echo ""
+            echo "Tipos de backup:"
+            echo "  full         Backup completo"
+            echo "  incremental  Backup incremental"
+            echo ""
+            echo "Etapas disponíveis (--step):"
+            echo "  database     Executa apenas backup do banco de dados"
+            echo "  compression  Executa apenas compactação"
+            echo "  upload       Executa apenas upload para R2"
+            echo "  all          Executa todas as etapas (padrão)"
+            echo ""
+            echo "Exemplos:"
+            echo "  $0 full                    # Backup completo com todas as etapas"
+            echo "  $0 full --step=database    # Apenas backup do banco"
+            echo "  $0 incremental --step=upload # Apenas upload de backup incremental"
+            exit 0
+            ;;
+        *)
+            # Parâmetro desconhecido
+            ;;
+    esac
+done
+
+# Define tipo de backup padrão se não especificado
 if [[ -z "$BACKUP_TYPE" ]]; then
     DAY_OF_WEEK=$(date +%u)
     if [[ "$DAY_OF_WEEK" -eq 7 ]]; then
@@ -14,7 +125,263 @@ if [[ -z "$BACKUP_TYPE" ]]; then
     fi
 fi
 
+# Define etapa padrão se não especificada
+if [[ -z "$SPECIFIC_STEP" ]]; then
+    SPECIFIC_STEP="all"
+fi
+
+# Valida etapa especificada
+case "$SPECIFIC_STEP" in
+    database|compression|upload|all)
+        ;;
+    *)
+        echo "Erro: Etapa inválida '$SPECIFIC_STEP'"
+        echo "Etapas válidas: database, compression, upload, all"
+        exit 1
+        ;;
+esac
+
 echo "Iniciando backup do tipo: $BACKUP_TYPE"
+if [[ "$SPECIFIC_STEP" != "all" ]]; then
+    echo "Executando apenas etapa: $SPECIFIC_STEP"
+fi
+
+# ===== FUNÇÕES MODULARES DAS ETAPAS =====
+
+# Função para executar backup do banco de dados
+execute_database_backup() {
+    local step_name="database_backup"
+    
+    echo "=== ETAPA: BACKUP DO BANCO DE DADOS ==="
+    
+    # Verifica checkpoint
+    if check_checkpoint "$step_name"; then
+        echo "✓ Backup do banco já concluído, verificando arquivo..."
+        if validate_file "$TMP_DIR" 100; then
+            echo "✓ Dados do backup encontrados em: $TMP_DIR"
+            return 0
+        else
+            echo "⚠ Checkpoint encontrado mas dados inválidos, refazendo backup do banco..."
+        fi
+    fi
+    
+    echo "Executando backup do banco de dados..."
+    
+    # Determina método de backup
+    determine_backup_method
+    local use_mydumper=$?
+    
+    local backup_success=1
+    
+    if [[ "$BACKUP_TYPE" == "full" ]]; then
+        if [[ $use_mydumper -eq 1 ]]; then
+            backup_with_mydumper
+            backup_success=$?
+        else
+            # Backup completo usando xtrabackup
+            local backup_params=$(build_xtrabackup_params)
+            
+            if [[ -n "$backup_params" ]]; then
+                xtrabackup --backup \
+                    --user="$DB_USER" \
+                    --password="$DB_PASS" \
+                    --host="$DB_HOST" \
+                    --port="$DB_PORT" \
+                    --target-dir="$TMP_DIR" \
+                    $backup_params
+            else
+                xtrabackup --backup \
+                    --user="$DB_USER" \
+                    --password="$DB_PASS" \
+                    --host="$DB_HOST" \
+                    --port="$DB_PORT" \
+                    --target-dir="$TMP_DIR"
+            fi
+            backup_success=$?
+        fi
+    else
+        # Backup incremental
+        if [[ $use_mydumper -eq 1 ]]; then
+            echo "Aviso: Backup incremental não é suportado no modo remoto (mydumper)."
+            echo "Executando backup completo com mydumper..."
+            backup_with_mydumper
+            backup_success=$?
+        else
+            # Lógica de backup incremental com xtrabackup
+            execute_incremental_backup
+            backup_success=$?
+        fi
+    fi
+    
+    if [[ $backup_success -ne 0 ]]; then
+        echo "Erro: Falha ao executar backup do banco de dados"
+        return 1
+    fi
+    
+    # Salva checkpoint
+    save_checkpoint "$step_name" "$(date -Iseconds)"
+    echo "✓ Backup do banco de dados concluído com sucesso!"
+    return 0
+}
+
+# Função para executar compactação
+execute_compression() {
+    local step_name="compression"
+    
+    echo "=== ETAPA: COMPACTAÇÃO ==="
+    
+    # Verifica checkpoint
+    if check_checkpoint "$step_name"; then
+        echo "✓ Compactação já concluída, verificando arquivo..."
+        if validate_file "$ARCHIVE_PATH" 1048576; then
+            echo "✓ Arquivo compactado encontrado: $ARCHIVE_PATH ($(stat -f%z "$ARCHIVE_PATH" 2>/dev/null || stat -c%s "$ARCHIVE_PATH" 2>/dev/null) bytes)"
+            return 0
+        else
+            echo "⚠ Checkpoint encontrado mas arquivo inválido, refazendo compactação..."
+        fi
+    fi
+    
+    # Verifica se diretório de backup existe
+    if [[ ! -d "$TMP_DIR" ]] || [[ ! "$(ls -A "$TMP_DIR" 2>/dev/null)" ]]; then
+        echo "Erro: Diretório de backup não encontrado ou vazio: $TMP_DIR"
+        echo "Execute primeiro: $0 $BACKUP_TYPE --step=database"
+        return 1
+    fi
+    
+    echo "Compactando backup..."
+    local compression=${COMPRESSION_LEVEL:-6}
+    echo "Compactando backup (nível de compressão: $compression)..."
+    
+    tar -cf - -C "$TMP_DIR" . | gzip -$compression > "$ARCHIVE_PATH"
+    
+    # Verifica se houve erro no tar ou no gzip
+    if [[ ${PIPESTATUS[0]} -ne 0 || ${PIPESTATUS[1]} -ne 0 ]]; then
+        echo "Erro: Falha ao criar arquivo compactado"
+        return 1
+    fi
+    
+    # Salva checkpoint
+    save_checkpoint "$step_name" "$(stat -f%z "$ARCHIVE_PATH" 2>/dev/null || stat -c%s "$ARCHIVE_PATH" 2>/dev/null)"
+    echo "✓ Compactação concluída com sucesso!"
+    return 0
+}
+
+# Função para executar upload
+execute_upload() {
+    local step_name="upload"
+    
+    echo "=== ETAPA: UPLOAD PARA R2 ==="
+    
+    # Verifica checkpoint
+    if check_checkpoint "$step_name"; then
+        echo "✓ Upload já concluído anteriormente"
+        echo "Verificando se arquivo ainda existe no R2..."
+        
+        if aws s3 ls "s3://$S3_BUCKET/$FILENAME" --endpoint-url="$S3_ENDPOINT" --region="$S3_REGION" >/dev/null 2>&1; then
+            echo "✓ Arquivo confirmado no R2!"
+            return 0
+        else
+            echo "⚠ Checkpoint encontrado mas arquivo não está no R2, refazendo upload..."
+        fi
+    fi
+    
+    # Verifica se arquivo compactado existe
+    if [[ ! -f "$ARCHIVE_PATH" ]] || [[ ! -s "$ARCHIVE_PATH" ]]; then
+        echo "Erro: Arquivo compactado não encontrado: $ARCHIVE_PATH"
+        echo "Execute primeiro: $0 $BACKUP_TYPE --step=compression"
+        return 1
+    fi
+    
+    echo "Enviando backup para R2..."
+    local timeout=${TRANSFER_TIMEOUT:-300}
+    echo "Fazendo upload do backup para o S3 (timeout: ${timeout}s)..."
+    
+    timeout "$timeout" aws s3 cp "$ARCHIVE_PATH" "s3://$S3_BUCKET/$S3_FOLDER/$FILENAME" --endpoint-url "$S3_ENDPOINT"
+    
+    if [[ $? -ne 0 ]]; then
+        echo "Erro: Falha ao enviar backup para R2"
+        return 1
+    fi
+    
+    # Salva checkpoint
+    save_checkpoint "$step_name" "$(date -Iseconds)"
+    echo "✓ Upload concluído com sucesso!"
+    return 0
+}
+
+# Função para executar backup incremental
+execute_incremental_backup() {
+    echo "Executando backup incremental..."
+    
+    # Busca o backup completo mais recente no R2
+    local latest_full=$(aws s3 ls "s3://$S3_BUCKET/$S3_FOLDER/" --endpoint-url="$S3_ENDPOINT" --region="$S3_REGION" | \
+                       grep "full" | sort | tail -n 1 | awk '{print $4}')
+    
+    if [[ -z "$latest_full" ]]; then
+        echo "Erro: Nenhum backup completo encontrado. Abortando backup incremental."
+        return 1
+    fi
+    
+    echo "Usando backup base: $latest_full"
+    
+    # Baixa e extrai o backup base
+    local base_dir="$TMP_BACKUP_PATH/base-backup"
+    mkdir -p "$base_dir"
+    
+    local timeout=${TRANSFER_TIMEOUT:-300}
+    timeout "$timeout" aws s3 cp "s3://$S3_BUCKET/$S3_FOLDER/$latest_full" "$base_dir/$latest_full" --endpoint-url="$S3_ENDPOINT"
+    
+    if [[ $? -ne 0 ]]; then
+        echo "Erro: Falha ao baixar backup base do R2"
+        rm -rf "$base_dir"
+        return 1
+    fi
+    
+    # Extrai o backup base
+    tar -xzf "$base_dir/$latest_full" -C "$base_dir"
+    if [[ $? -ne 0 ]]; then
+        echo "Erro: Falha ao extrair backup base"
+        rm -rf "$base_dir"
+        return 1
+    fi
+    
+    # Encontra o diretório do backup extraído
+    local backup_base_dir=$(find "$base_dir" -type d -name "*-*-*_*-*-*" | head -n 1)
+    if [[ -z "$backup_base_dir" ]]; then
+        backup_base_dir="$base_dir"
+    fi
+    
+    # Executa backup incremental
+    local backup_params=$(build_xtrabackup_params)
+    
+    if [[ -n "$backup_params" ]]; then
+        xtrabackup --backup \
+            --user="$DB_USER" \
+            --password="$DB_PASS" \
+            --host="$DB_HOST" \
+            --port="$DB_PORT" \
+            --target-dir="$TMP_DIR" \
+            --incremental-basedir="$backup_base_dir" \
+            --datadir="$DB_DATA_DIR" \
+            $backup_params
+    else
+        xtrabackup --backup \
+            --user="$DB_USER" \
+            --password="$DB_PASS" \
+            --host="$DB_HOST" \
+            --port="$DB_PORT" \
+            --target-dir="$TMP_DIR" \
+            --incremental-basedir="$backup_base_dir" \
+            --datadir="$DB_DATA_DIR"
+    fi
+    
+    local result=$?
+    
+    # Remove diretório base temporário
+    rm -rf "$base_dir"
+    
+    return $result
+}
 
 # Configurações de data e diretórios
 DATE=$(date +%F_%H-%M-%S)
@@ -35,6 +402,62 @@ FILENAME="${PREFIX}${DATE}-${BACKUP_TYPE}${SUFFIX}.tar.gz"
 ARCHIVE_PATH="$TMP_BACKUP_PATH/$FILENAME"
 
 echo "Criando backup em: $TMP_DIR"
+
+# ===== VERIFICAÇÕES DE RESUMO =====
+echo "Verificando se existem checkpoints para resumir..."
+
+# Verifica se já existe backup do banco concluído
+if check_checkpoint "database_backup"; then
+    echo "✓ Backup do banco já concluído, verificando arquivo..."
+    if validate_file "$TMP_DIR" 100; then  # Verifica se diretório tem conteúdo
+        echo "✓ Dados do backup encontrados em: $TMP_DIR"
+        SKIP_DATABASE_BACKUP=true
+    else
+        echo "⚠ Checkpoint encontrado mas dados inválidos, refazendo backup do banco..."
+        SKIP_DATABASE_BACKUP=false
+    fi
+else
+    SKIP_DATABASE_BACKUP=false
+fi
+
+# Verifica se já existe arquivo compactado
+if check_checkpoint "compression"; then
+    echo "✓ Compactação já concluída, verificando arquivo..."
+    if validate_file "$ARCHIVE_PATH" 1048576; then  # Mínimo 1MB para arquivo compactado
+        echo "✓ Arquivo compactado encontrado: $ARCHIVE_PATH ($(stat -f%z "$ARCHIVE_PATH" 2>/dev/null || stat -c%s "$ARCHIVE_PATH" 2>/dev/null) bytes)"
+        SKIP_COMPRESSION=true
+    else
+        echo "⚠ Checkpoint encontrado mas arquivo inválido, refazendo compactação..."
+        SKIP_COMPRESSION=false
+    fi
+else
+    SKIP_COMPRESSION=false
+fi
+
+# Verifica se upload já foi concluído
+if check_checkpoint "upload"; then
+    echo "✓ Upload já concluído anteriormente"
+    echo "Verificando se arquivo ainda existe no R2..."
+    
+    # Tenta verificar se arquivo existe no R2
+    if aws s3 ls "s3://$S3_BUCKET/$FILENAME" --endpoint-url="$S3_ENDPOINT" --region="$S3_REGION" >/dev/null 2>&1; then
+        echo "✓ Arquivo confirmado no R2, backup já está completo!"
+        cleanup_checkpoints "true"
+        echo "Processo de backup finalizado com sucesso! (resumido)"
+        exit 0
+    else
+        echo "⚠ Checkpoint encontrado mas arquivo não está no R2, refazendo upload..."
+        SKIP_UPLOAD=false
+    fi
+else
+    SKIP_UPLOAD=false
+fi
+
+echo "Resumo das etapas:"
+echo "- Backup do banco: $([ "$SKIP_DATABASE_BACKUP" = true ] && echo "PULAR" || echo "EXECUTAR")"
+echo "- Compactação: $([ "$SKIP_COMPRESSION" = true ] && echo "PULAR" || echo "EXECUTAR")"
+echo "- Upload: $([ "$SKIP_UPLOAD" = true ] && echo "PULAR" || echo "EXECUTAR")"
+echo ""
 
 # Função para determinar o método de backup
 determine_backup_method() {
@@ -108,201 +531,114 @@ backup_with_mydumper() {
 determine_backup_method
 USE_MYDUMPER=$?
 
-# Realiza backup usando mydumper (remoto) ou Percona XtraBackup (local)
-if [[ "$BACKUP_TYPE" == "full" ]]; then
-    echo "Executando backup completo..."
+# LÓGICA PRINCIPAL MODULAR COM CHECKPOINTS
+# Executa apenas as etapas necessárias baseado nos checkpoints e parâmetros
+
+# Execução baseada na etapa específica ou todas as etapas
+if [[ "$SPECIFIC_STEP" == "all" ]]; then
+    # Executa todas as etapas necessárias
     
-    if [[ $USE_MYDUMPER -eq 1 ]]; then
-        # Usa mydumper para backup remoto
-        backup_with_mydumper
-        BACKUP_SUCCESS=$?
+    # 1. Backup do banco de dados
+    if [[ "$SKIP_DATABASE_BACKUP" == "true" ]]; then
+        echo "⏭ Pulando backup do banco (já concluído)"
     else
-        # Backup completo usando xtrabackup (local)
-        BACKUP_PARAMS=$(build_xtrabackup_params)
-        
-        if [[ -n "$BACKUP_PARAMS" ]]; then
-            xtrabackup --backup \
-                --user="$DB_USER" \
-                --password="$DB_PASS" \
-                --host="$DB_HOST" \
-                --port="$DB_PORT" \
-                --target-dir="$TMP_DIR" \
-                --datadir="$DB_DATA_DIR" \
-                $BACKUP_PARAMS
+        if [[ "$BACKUP_TYPE" == "full" ]]; then
+            execute_database_backup
         else
-            xtrabackup --backup \
-                --user="$DB_USER" \
-                --password="$DB_PASS" \
-                --host="$DB_HOST" \
-                --port="$DB_PORT" \
-                --target-dir="$TMP_DIR" \
-                --datadir="$DB_DATA_DIR"
+            # Backup incremental
+            if [[ $USE_MYDUMPER -eq 1 ]]; then
+                echo "Aviso: Backup incremental não é suportado no modo remoto (mydumper)."
+                echo "Executando backup completo com mydumper..."
+                execute_database_backup
+            else
+                execute_incremental_backup
+            fi
         fi
-        BACKUP_SUCCESS=$?
+        
+        if [[ $? -ne 0 ]]; then
+            echo "Erro: Falha no backup do banco de dados"
+            exit 1
+        fi
+        
+        save_checkpoint "backup" "$(date -Iseconds)"
     fi
     
-    if [[ $? -ne 0 ]]; then
-        echo "Erro: Falha ao executar backup completo"
-        
-        # Envia webhook de erro
-        if [[ "$WEBHOOK_EVENTS" == *"error"* ]]; then
-            curl -X POST -H "Content-Type: application/json" \
-                 -d '{"event":"backup_error","type":"full","error":"xtrabackup failed","timestamp":"'"$(date -Iseconds)"'"}' \
-                 "$WEBHOOK_URL" 2>/dev/null
+    # 2. Compactação
+    if [[ "$SKIP_COMPRESSION" == "true" ]]; then
+        echo "⏭ Pulando compactação (já concluída)"
+    else
+        execute_compression
+        if [[ $? -ne 0 ]]; then
+            echo "Erro: Falha na compactação"
+            exit 1
         fi
-        
-        rm -rf "$TMP_DIR"
-        exit 1
+        save_checkpoint "compression" "$(date -Iseconds)"
+    fi
+    
+    # 3. Upload
+    if [[ "$SKIP_UPLOAD" == "true" ]]; then
+        echo "⏭ Pulando upload (já concluído)"
+    else
+        execute_upload
+        if [[ $? -ne 0 ]]; then
+            echo "Erro: Falha no upload"
+            exit 1
+        fi
+        save_checkpoint "upload" "$(date -Iseconds)"
     fi
     
 else
-    echo "Executando backup incremental..."
+    # Executa apenas a etapa específica
+    echo "Executando apenas a etapa: $SPECIFIC_STEP"
     
-    # Verifica se backup incremental é compatível com as configurações
-    if [[ $USE_MYDUMPER -eq 1 ]]; then
-        echo "Aviso: Backup incremental não é suportado no modo remoto (mydumper)."
-        echo "Executando backup completo com mydumper..."
-        backup_with_mydumper
-        BACKUP_SUCCESS=$?
-        
-        if [[ $BACKUP_SUCCESS -ne 0 ]]; then
-            echo "Erro: Falha ao executar backup com mydumper"
-            
-            # Envia webhook de erro
-            if [[ "$WEBHOOK_EVENTS" == *"error"* ]]; then
-                curl -X POST -H "Content-Type: application/json" \
-                     -d '{"event":"backup_error","type":"incremental_fallback","error":"mydumper failed","timestamp":"'"$(date -Iseconds)"'"}' \
-                     "$WEBHOOK_URL" 2>/dev/null
+    case "$SPECIFIC_STEP" in
+        "backup")
+            if [[ "$BACKUP_TYPE" == "full" ]]; then
+                execute_database_backup
+            else
+                if [[ $USE_MYDUMPER -eq 1 ]]; then
+                    echo "Aviso: Backup incremental não é suportado no modo remoto (mydumper)."
+                    echo "Executando backup completo com mydumper..."
+                    execute_database_backup
+                else
+                    execute_incremental_backup
+                fi
             fi
             
-            rm -rf "$TMP_DIR"
-            exit 1
-        fi
-    else
-        # Busca o último backup completo no R2
-        LATEST_FULL=$(aws s3 ls s3://$S3_BUCKET/$S3_FOLDER/ --endpoint-url "$S3_ENDPOINT" | grep full | sort | tail -n 1 | awk '{print $4}')
+            if [[ $? -eq 0 ]]; then
+                save_checkpoint "backup" "$(date -Iseconds)"
+                echo "✓ Backup concluído com sucesso!"
+            else
+                echo "✗ Falha no backup"
+                exit 1
+            fi
+            ;;
+        "compression")
+            execute_compression
+            if [[ $? -eq 0 ]]; then
+                save_checkpoint "compression" "$(date -Iseconds)"
+                echo "✓ Compactação concluída com sucesso!"
+            else
+                echo "✗ Falha na compactação"
+                exit 1
+            fi
+            ;;
+        "upload")
+            execute_upload
+            if [[ $? -eq 0 ]]; then
+                save_checkpoint "upload" "$(date -Iseconds)"
+                echo "✓ Upload concluído com sucesso!"
+            else
+                echo "✗ Falha no upload"
+                exit 1
+            fi
+            ;;
+    esac
     
-    if [[ -z "$LATEST_FULL" ]]; then
-        echo "Erro: Nenhum backup completo encontrado. Abortando backup incremental."
-        
-        # Envia webhook de erro
-        if [[ "$WEBHOOK_EVENTS" == *"error"* ]]; then
-            curl -X POST -H "Content-Type: application/json" \
-                 -d '{"event":"backup_error","type":"incremental","error":"no full backup found","timestamp":"'"$(date -Iseconds)"'"}' \
-                 "$WEBHOOK_URL" 2>/dev/null
-        fi
-        
-        rm -rf "$TMP_DIR"
-        exit 1
-    fi
-    
-    echo "Usando backup base: $LATEST_FULL"
-    
-    # Baixa e extrai o backup completo base
-    BASE_DIR="$TMP_BACKUP_PATH/base-backup-$DATE"
-    mkdir -p "$BASE_DIR"
-    
-    aws s3 cp "s3://$S3_BUCKET/$S3_FOLDER/$LATEST_FULL" "$BASE_DIR/" --endpoint-url "$S3_ENDPOINT"
-    
-    if [[ $? -ne 0 ]]; then
-        echo "Erro: Falha ao baixar backup base do R2"
-        rm -rf "$TMP_DIR" "$BASE_DIR"
-        exit 1
-    fi
-    
-    tar -xzf "$BASE_DIR/$LATEST_FULL" -C "$BASE_DIR"
-    
-    if [[ $? -ne 0 ]]; then
-        echo "Erro: Falha ao extrair backup base"
-        rm -rf "$TMP_DIR" "$BASE_DIR"
-        exit 1
-    fi
-    
-    # Encontra o diretório do backup extraído
-    BACKUP_BASE_DIR=$(find "$BASE_DIR" -type d -name "*-*-*_*-*-*" | head -n 1)
-    if [[ -z "$BACKUP_BASE_DIR" ]]; then
-        BACKUP_BASE_DIR="$BASE_DIR"
-    fi
-    
-    # Executa backup incremental
-    BACKUP_PARAMS=$(build_xtrabackup_params)
-    
-    if [[ -n "$BACKUP_PARAMS" ]]; then
-        xtrabackup --backup \
-            --user="$DB_USER" \
-            --password="$DB_PASS" \
-            --host="$DB_HOST" \
-            --port="$DB_PORT" \
-            --target-dir="$TMP_DIR" \
-            --incremental-basedir="$BACKUP_BASE_DIR" \
-            --datadir="$DB_DATA_DIR" \
-            $BACKUP_PARAMS
-    else
-        xtrabackup --backup \
-            --user="$DB_USER" \
-            --password="$DB_PASS" \
-            --host="$DB_HOST" \
-            --port="$DB_PORT" \
-            --target-dir="$TMP_DIR" \
-            --incremental-basedir="$BACKUP_BASE_DIR" \
-            --datadir="$DB_DATA_DIR"
-    fi
-    
-    if [[ $? -ne 0 ]]; then
-        echo "Erro: Falha ao executar backup incremental"
-        
-        # Envia webhook de erro
-        if [[ "$WEBHOOK_EVENTS" == *"error"* ]]; then
-            curl -X POST -H "Content-Type: application/json" \
-                 -d '{"event":"backup_error","type":"incremental","error":"xtrabackup incremental failed","timestamp":"'"$(date -Iseconds)"'"}' \
-                 "$WEBHOOK_URL" 2>/dev/null
-        fi
-        
-        rm -rf "$TMP_DIR" "$BASE_DIR"
-        exit 1
-    fi
-    
-    # Remove diretório base temporário
-    rm -rf "$BASE_DIR"
-    fi
+    # Para etapas específicas, não continua com o resto do script
+    echo "Etapa '$SPECIFIC_STEP' concluída. Finalizando..."
+    exit 0
 fi
-
-echo "Backup executado com sucesso. Criando arquivo compactado..."
-
-# Compacta o backup com nível de compressão configurável
-COMPRESSION=${COMPRESSION_LEVEL:-6}
-echo "Compactando backup (nível de compressão: $COMPRESSION)..."
-tar -cf - -C "$TMP_DIR" . | gzip -$COMPRESSION > "$ARCHIVE_PATH"
-
-# Verifica se houve erro no tar ou no gzip
-if [[ ${PIPESTATUS[0]} -ne 0 || ${PIPESTATUS[1]} -ne 0 ]]; then
-    echo "Erro: Falha ao criar arquivo compactado"
-    rm -rf "$TMP_DIR"
-    exit 1
-fi
-
-echo "Enviando backup para R2..."
-
-# Faz upload para o S3 com timeout configurável
-TIMEOUT=${TRANSFER_TIMEOUT:-300}
-echo "Fazendo upload do backup para o S3 (timeout: ${TIMEOUT}s)..."
-timeout "$TIMEOUT" aws s3 cp "$ARCHIVE_PATH" "s3://$S3_BUCKET/$S3_FOLDER/$FILENAME" --endpoint-url "$S3_ENDPOINT"
-
-if [[ $? -ne 0 ]]; then
-    echo "Erro: Falha ao enviar backup para R2"
-    
-    # Envia webhook de erro
-    if [[ "$WEBHOOK_EVENTS" == *"error"* ]]; then
-        curl -X POST -H "Content-Type: application/json" \
-             -d '{"event":"backup_error","type":"'"$BACKUP_TYPE"'","error":"upload to R2 failed","timestamp":"'"$(date -Iseconds)"'"}' \
-             "$WEBHOOK_URL" 2>/dev/null
-    fi
-    
-    rm -rf "$TMP_DIR" "$ARCHIVE_PATH"
-    exit 1
-fi
-
-echo "Backup enviado com sucesso!"
 
 # Envia webhook de sucesso
 if [[ "$WEBHOOK_EVENTS" == *"success"* ]]; then
@@ -314,5 +650,8 @@ fi
 # Limpeza dos arquivos temporários
 echo "Limpando arquivos temporários..."
 rm -rf "$TMP_DIR" "$ARCHIVE_PATH"
+
+# Limpa checkpoints após sucesso completo
+cleanup_checkpoints "true"
 
 echo "Processo de backup finalizado com sucesso!"
