@@ -16,7 +16,7 @@ Sistema inteligente de backup MySQL que suporta dois modos de operação: **loca
 
 ```
 percona-backup-r2-package/
-├── .env                    # Configurações gerais e exemplos
+├── .env.example           # Configurações gerais e exemplos
 ├── scripts/
 │   ├── backup.sh          # Script principal de backup
 │   ├── restore.sh         # Script de restauração
@@ -106,7 +106,13 @@ FLUSH PRIVILEGES;
 ## ⚙️ Configuração
 
 ### 1. Configurar Variáveis de Ambiente
-Edite o arquivo <mcfile name=".env" path="/Users/alanmosko/Sites/percona-backup-r2-package/.env"></mcfile> com suas configurações:
+Copie o arquivo de exemplo para o arquivo de configuração:
+
+```bash
+cp .env.example .env
+```
+
+Edite o arquivo `.env` com suas configurações:
 
 ```bash
 # Modo de backup (local ou remote)
