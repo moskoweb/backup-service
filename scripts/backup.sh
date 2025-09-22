@@ -256,7 +256,12 @@ execute_upload() {
     local timeout=${TRANSFER_TIMEOUT:-300}
     echo "Fazendo upload do backup para o S3 (timeout: ${timeout}s)..."
     
-    timeout "$timeout" aws s3 cp "$ARCHIVE_PATH" "s3://$S3_BUCKET/$S3_FOLDER/$FILENAME" --endpoint-url "$S3_ENDPOINT"
+    timeout "$timeout" aws s3 cp "$ARCHIVE_PATH" "s3://$S3_BUCKET/$S3_FOLDER/$FILENAME" \
+        --endpoint-url "$S3_ENDPOINT" \
+        --cli-read-timeout 0 \
+        --multipart-threshold 64MB \
+        --multipart-chunksize 16MB \
+        --max-concurrent-requests 20
     
     if [[ $? -ne 0 ]]; then
         echo "Erro: Falha ao enviar backup para R2"
@@ -292,7 +297,12 @@ execute_incremental_backup() {
     mkdir -p "$base_dir"
     
     local timeout=${TRANSFER_TIMEOUT:-300}
-    timeout "$timeout" aws s3 cp "s3://$S3_BUCKET/$S3_FOLDER/$latest_full" "$base_dir/$latest_full" --endpoint-url="$S3_ENDPOINT"
+    timeout "$timeout" aws s3 cp "s3://$S3_BUCKET/$S3_FOLDER/$latest_full" "$base_dir/$latest_full" \
+        --endpoint-url="$S3_ENDPOINT" \
+        --cli-read-timeout 0 \
+        --multipart-threshold 64MB \
+        --multipart-chunksize 16MB \
+        --max-concurrent-requests 20
     
     if [[ $? -ne 0 ]]; then
         echo "Erro: Falha ao baixar backup base do R2"
@@ -471,6 +481,17 @@ backup_with_mydumper() {
     mydumper_cmd+=" --triggers"
     mydumper_cmd+=" --long-query-guard=3600"
     mydumper_cmd+=" --kill-long-queries"
+    
+    # Detecta número total de threads da máquina
+    local cpu_threads=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "4")
+    
+    # Otimizações de performance para backup remoto
+    mydumper_cmd+=" --rows=10000"
+    mydumper_cmd+=" --threads=$cpu_threads"
+    mydumper_cmd+=" --chunk-filesize=1024"
+    mydumper_cmd+=" --build-empty-files"
+    mydumper_cmd+=" --single-transaction"
+    mydumper_cmd+=" --trx-consistency-only"
     
     # Se DB_DATABASE está definido, faz backup apenas desse banco
     if [[ -n "$DB_DATABASE" ]]; then

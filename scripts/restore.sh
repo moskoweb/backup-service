@@ -108,7 +108,12 @@ execute_download() {
     # Download do backup do R2/S3 com timeout configurável
     local timeout=${TRANSFER_TIMEOUT:-300}
     echo "Baixando backup do R2 (timeout: ${timeout}s)..."
-    timeout "$timeout" aws s3 cp "s3://$S3_BUCKET/$S3_FOLDER/$BACKUP_FILE" "$TMP_DIR/" --endpoint-url "$S3_ENDPOINT"
+    timeout "$timeout" aws s3 cp "s3://$S3_BUCKET/$S3_FOLDER/$BACKUP_FILE" "$TMP_DIR/" \
+        --endpoint-url "$S3_ENDPOINT" \
+        --cli-read-timeout 0 \
+        --multipart-threshold 64MB \
+        --multipart-chunksize 16MB \
+        --max-concurrent-requests 20
     
     if [[ $? -ne 0 ]]; then
         echo "Erro: Falha ao baixar o backup do R2"
@@ -380,9 +385,8 @@ execute_restore() {
         # Etapa 3: Configuração de performance para myloader
         echo "Etapa 3/5: Configurando parâmetros de performance..."
         
-        # Calcula threads baseado no número de CPUs
-        local cpu_cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "4")
-        local threads=$((cpu_cores > 8 ? 8 : cpu_cores))
+        # Detecta número total de threads da máquina
+        local cpu_threads=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "4")
         
         # Configurações otimizadas para myloader
         local myloader_opts=(
@@ -391,11 +395,16 @@ execute_restore() {
             "--user=$DB_USER"
             "--password=$DB_PASS"
             "--directory=$backup_dir"
-            "--threads=$threads"
+            "--threads=$cpu_threads"
             "--compress-protocol"
             "--overwrite-tables"
             "--enable-binlog"
             "--verbose=2"
+            "--rows=10000"                    # Processa 10k linhas por vez
+            "--max-packet-size=1073741824"    # Pacotes de até 1GB (performance)
+            "--innodb-optimize-keys"          # Otimiza chaves InnoDB
+            "--skip-definer"                  # Ignora definers para compatibilidade
+            "--purge-mode=TRUNCATE"           # Usa TRUNCATE ao invés de DELETE
         )
         
         echo "✓ Configurado para usar $threads threads"
