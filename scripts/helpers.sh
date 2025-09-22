@@ -267,13 +267,13 @@ get_backup_mode() {
 # -----------------------------------------------------------------------------
 # Função para detectar formato de backup
 # -----------------------------------------------------------------------------
-# Detecta o formato do backup baseado nos arquivos presentes
+# Detecta o formato do backup considerando o modo (local/remoto) e arquivos
 # Parâmetros:
 #   $1: diretório do backup extraído
 # Retorna:
-#   "xtrabackup" se encontrar arquivos característicos do xtrabackup
-#   "mydumper" se encontrar arquivos característicos do mydumper
-#   "unknown" se não conseguir determinar
+#   "xtrabackup" para backups locais (modo local sempre usa xtrabackup)
+#   "mydumper" para backups remotos (modo remoto sempre usa mydumper)
+#   Se não conseguir determinar pelo modo, analisa arquivos no diretório
 # -----------------------------------------------------------------------------
 detect_backup_format() {
     local backup_dir="$1"
@@ -283,6 +283,27 @@ detect_backup_format() {
         return 1
     fi
     
+    # Obtém o modo de backup configurado
+    local backup_mode=$(get_backup_mode)
+    
+    # Determina formato baseado no modo configurado
+    case "$backup_mode" in
+        "local")
+            # Modo local sempre usa xtrabackup
+            echo "xtrabackup"
+            return 0
+            ;;
+        "remote")
+            # Modo remoto sempre usa mydumper
+            echo "mydumper"
+            return 0
+            ;;
+        *)
+            # Se modo não está definido ou é inválido, detecta pelos arquivos
+            ;;
+    esac
+    
+    # Fallback: Detecção por análise de arquivos (compatibilidade com versões antigas)
     # Verifica se é backup xtrabackup (procura por arquivos característicos)
     if [[ -f "$backup_dir/xtrabackup_checkpoints" ]] || \
        [[ -f "$backup_dir/xtrabackup_info" ]] || \
@@ -301,7 +322,7 @@ detect_backup_format() {
         return 0
     fi
     
-    # Se não conseguir determinar, retorna unknown
+    # Se não conseguir determinar nem pelo modo nem pelos arquivos, retorna unknown
     echo "unknown"
     return 1
 }
