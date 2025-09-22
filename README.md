@@ -176,7 +176,7 @@ Crie um usuário específico para backups:
 ```sql
 -- Para modo local (XtraBackup)
 CREATE USER 'backup_user'@'localhost' IDENTIFIED BY 'senha_segura';
-GRANT RELOAD, LOCK TABLES, PROCESS, REPLICATION CLIENT ON *.* TO 'backup_user'@'localhost';
+GRANT RELOAD, LOCK TABLES, PROCESS, REPLICATION CLIENT, BACKUP_ADMIN ON *.* TO 'backup_user'@'localhost';
 GRANT CREATE, INSERT, DROP, UPDATE ON mysql.backup_progress TO 'backup_user'@'localhost';
 
 -- Para modo remoto (mydumper) - adicionar também:
@@ -335,7 +335,7 @@ rm -rf /tmp/cleanup_checkpoints_*
 
 ## 🔔 Webhooks e Notificações
 
-Configure webhooks para receber notificações em tempo real:
+Configure webhooks para receber notificações em tempo real sobre todas as operações do sistema:
 
 ```bash
 # No .env
@@ -343,11 +343,99 @@ WEBHOOK_URL=https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXX
 WEBHOOK_EVENTS=success,error,restore,cleanup
 ```
 
-**Eventos Disponíveis:**
-- `success`: Backup concluído com sucesso
-- `error`: Erro durante o backup
-- `restore`: Restauração realizada
-- `cleanup`: Limpeza de backups executada
+### 🏷️ Códigos de Status Padronizados
+
+O sistema utiliza códigos padronizados para identificar diferentes tipos de eventos:
+
+#### 📦 **Backup (backup.sh)**
+- **B000**: Backup concluído com sucesso
+- **B001**: Falha no backup do banco de dados
+- **B002**: Falha na compactação do backup
+- **B003**: Falha no upload para R2
+
+#### 🔄 **Restore (restore.sh)**
+- **R000**: Restore concluído com sucesso
+- **R001**: Falha no download do backup
+- **R002**: Falha na extração do backup
+- **R003**: Falha no restore do backup
+
+#### 🧹 **Cleanup (cleanup.sh)**
+- **C000**: Processo de limpeza concluído
+- **C001**: Falha na listagem de arquivos
+- **C002**: Falha na remoção de arquivos
+- **C003**: Falha na verificação final
+
+### 📋 Lista Completa de Webhooks Ativos
+
+#### 📦 **Script de Backup (backup.sh)**
+
+**Webhooks de Sucesso:**
+- **B000** - `"Backup concluído com sucesso"` - Backup finalizado com sucesso
+
+**Webhooks de Erro:**
+- **B001** - `"Falha no backup do banco de dados"` - Erro durante execução do backup
+- **B002** - `"Falha na compactação do backup"` - Erro durante compactação do arquivo
+- **B003** - `"Falha no upload para R2"` - Erro ao enviar arquivo para o bucket
+
+#### 🔄 **Script de Restore (restore.sh)**
+
+**Webhooks de Sucesso:**
+- **R000** - `"Restore concluído"` - Restore do backup concluído com sucesso
+
+**Webhooks de Erro:**
+- **R001** - `"Falha no download do backup"` - Erro ao baixar arquivo do bucket
+- **R002** - `"Falha na extração do backup"` - Erro ao extrair arquivo de backup
+- **R003** - `"Falha no restore do backup"` - Erro ao restaurar dados do MySQL
+
+#### 🧹 **Script de Limpeza (cleanup.sh)**
+
+**Webhooks de Sucesso:**
+- **C000** - `"Processo de limpeza concluído"` - Limpeza completa finalizada com sucesso
+
+**Webhooks de Erro:**
+- **C001** - `"Falha na listagem de arquivos"` - Erro durante listagem de arquivos
+- **C002** - `"Falha na remoção de arquivos"` - Erro durante remoção de arquivos antigos
+- **C003** - `"Falha na verificação final"` - Erro durante verificação final de limpeza
+
+### 📊 **Exemplos de Webhooks Enviados**
+
+#### ✅ **Webhook de Sucesso (Backup)**
+```json
+{
+    "event": "success",
+    "timestamp": "2025-01-21 02:00:00",
+    "message": "Backup concluído com sucesso",
+    "code": "B000",
+    "details": "Backup full finalizado",
+    "filename": "backup_20250121_020000.tar.gz"
+}
+```
+
+#### ❌ **Webhook de Erro (Restore)**
+```json
+{
+    "event": "error",
+    "timestamp": "2025-01-21 03:15:00",
+    "message": "Falha no download do backup",
+    "code": "R001",
+    "details": "Erro ao baixar arquivo do bucket",
+    "filename": "backup_20250120_020000.tar.gz"
+}
+```
+
+#### ✅ **Webhook de Sucesso (Cleanup)**
+```json
+{
+    "event": "success",
+    "timestamp": "2025-01-21 04:00:00",
+    "message": "Processo de limpeza concluído",
+    "code": "C000",
+    "details": "Limpeza completa finalizada com sucesso",
+    "removed_files": 5,
+    "freed_space": "2.3GB"
+}
+```
+
 
 ## 🗓️ Agendamento com Cron
 

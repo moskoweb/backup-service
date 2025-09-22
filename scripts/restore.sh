@@ -3,79 +3,18 @@
 # Carrega as variáveis de ambiente
 source "$(dirname "$0")/../.env"
 
-# SISTEMA DE CHECKPOINTS PARA RESTORE
-# Diretório para armazenar checkpoints
+# Carrega funções auxiliares
+source "$(dirname "$0")/helpers.sh"
+
+# ===== CONFIGURAÇÕES ESPECÍFICAS DO RESTORE =====
+# Diretório para armazenar checkpoints específicos do restore
 CHECKPOINT_DIR="$TMP_BACKUP_PATH/restore_checkpoints"
 mkdir -p "$CHECKPOINT_DIR"
 
-# Função para salvar checkpoint
-save_checkpoint() {
-    local step="$1"
-    local data="$2"
-    local today=$(date +%Y-%m-%d)
-    local checkpoint_file="$CHECKPOINT_DIR/restore_${today}_${step}.checkpoint"
-    
-    echo "$data" > "$checkpoint_file"
-    echo "✓ Checkpoint salvo: $step"
-}
-
-# Função para verificar se checkpoint existe
-check_checkpoint() {
-    local step="$1"
-    local today=$(date +%Y-%m-%d)
-    local checkpoint_file="$CHECKPOINT_DIR/restore_${today}_${step}.checkpoint"
-    
-    if [[ -f "$checkpoint_file" ]]; then
-        return 0  # Checkpoint existe
-    else
-        return 1  # Checkpoint não existe
-    fi
-}
-
-# Função para obter dados do checkpoint
-get_checkpoint_data() {
-    local step="$1"
-    local today=$(date +%Y-%m-%d)
-    local checkpoint_file="$CHECKPOINT_DIR/restore_${today}_${step}.checkpoint"
-    
-    if [[ -f "$checkpoint_file" ]]; then
-        cat "$checkpoint_file"
-    fi
-}
-
-# Função para limpar checkpoints
-cleanup_checkpoints() {
-    local success="$1"
-    local today=$(date +%Y-%m-%d)
-    
-    if [[ "$success" == "true" ]]; then
-        # Remove checkpoints do dia atual após sucesso
-        rm -f "$CHECKPOINT_DIR"/restore_${today}_*.checkpoint
-        echo "✓ Checkpoints de restore limpos"
-    else
-        # Remove checkpoints antigos (mais de 7 dias)
-        find "$CHECKPOINT_DIR" -name "restore_*.checkpoint" -mtime +7 -delete 2>/dev/null
-    fi
-}
-
-# Função para validar arquivo
-validate_file() {
-    local file_path="$1"
-    local expected_size="$2"
-    
-    if [[ ! -f "$file_path" ]]; then
-        return 1
-    fi
-    
-    if [[ -n "$expected_size" ]]; then
-        local actual_size=$(stat -f%z "$file_path" 2>/dev/null || stat -c%s "$file_path" 2>/dev/null)
-        if [[ "$actual_size" != "$expected_size" ]]; then
-            return 1
-        fi
-    fi
-    
-    return 0
-}
+# Configurações específicas do restore
+# -----------------------------------------------------------------------------
+# As funções de checkpoint agora são fornecidas pelo helpers.sh
+# e automaticamente detectam e incluem variáveis específicas do script
 
 # SISTEMA DE PARÂMETROS
 BACKUP_FILE=""
@@ -145,7 +84,7 @@ if [[ "$SPECIFIC_STEP" != "all" ]]; then
 fi
 
 # Cria diretório temporário usando a variável do .env
-TMP_DIR="$TMP_BACKUP_PATH/db-restore-$(date +%s)"
+TMP_DIR="$TMP_BACKUP_PATH/db-restore"
 mkdir -p "$TMP_DIR"
 
 # FUNÇÕES MODULARES PARA RESTORE
@@ -173,12 +112,14 @@ execute_download() {
     
     if [[ $? -ne 0 ]]; then
         echo "Erro: Falha ao baixar o backup do R2"
+        send_webhook "error" "Falha no download do backup" "Erro ao baixar arquivo $BACKUP_FILE do bucket $S3_BUCKET" "R001" "$BACKUP_FILE"
         return 1
     fi
     
     # Valida arquivo baixado
     if ! validate_file "$TMP_DIR/$BACKUP_FILE"; then
         echo "Erro: Arquivo baixado está corrompido"
+        send_webhook "error" "Falha no download do backup" "Arquivo $BACKUP_FILE baixado está corrompido ou inválido" "R001" "$BACKUP_FILE"
         return 1
     fi
     
@@ -209,6 +150,7 @@ execute_extract() {
     
     if [[ $? -ne 0 ]]; then
         echo "Erro: Falha ao extrair o arquivo de backup"
+        send_webhook "error" "Falha na extração do backup" "Erro ao extrair arquivo $BACKUP_FILE" "R002" "$BACKUP_FILE"
         return 1
     fi
     
@@ -263,6 +205,7 @@ execute_restore() {
     
     if [[ $? -ne 0 ]]; then
         echo "Erro: Falha ao preparar o backup"
+        send_webhook "error" "Falha no restore do backup" "Erro ao preparar backup com xtrabackup no diretório $backup_dir" "R003" "$BACKUP_FILE"
         return 1
     fi
     
@@ -279,6 +222,7 @@ execute_restore() {
     
     if [[ $? -ne 0 ]]; then
         echo "Erro: Falha ao restaurar os dados"
+        send_webhook "error" "Falha no restore do backup" "Erro ao restaurar dados do MySQL para $DB_DATA_DIR" "R003" "$BACKUP_FILE"
         # Restaura backup anterior se existir
         local backup_old=$(ls -1t "$DB_DATA_DIR".backup.* 2>/dev/null | head -n 1)
         if [[ -n "$backup_old" ]]; then
@@ -311,25 +255,9 @@ execute_restore() {
     fi
 }
 
-# Função para envio de webhooks
-send_webhook() {
-    local event="$1"
-    local message="$2"
-    
-    if [[ -n "$WEBHOOK_URL" && "$WEBHOOK_EVENTS" == *"$event"* ]]; then
-        curl -X POST -H "Content-Type: application/json" \
-             -d '{"event":"'"$event"'","message":"'"$message"'","file":"'"$BACKUP_FILE"'","timestamp":"'"$(date -Iseconds)"'"}' \
-             "$WEBHOOK_URL" 2>/dev/null
-    fi
-}
 
-# Função para limpeza de arquivos temporários
-cleanup_temp_files() {
-    if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
-        echo "Limpando arquivos temporários..."
-        rm -rf "$TMP_DIR"
-    fi
-}
+
+
 
 echo "Iniciando processo de restore do backup: $BACKUP_FILE"
 
@@ -349,7 +277,6 @@ if [[ "$SPECIFIC_STEP" != "all" ]]; then
                     echo "✓ Etapa 'download' concluída"
                 else
                     echo "✗ Falha na etapa 'download'"
-                    send_webhook "error" "Falha no download do backup: $BACKUP_FILE"
                     cleanup_temp_files
                     exit 1
                 fi
@@ -364,7 +291,6 @@ if [[ "$SPECIFIC_STEP" != "all" ]]; then
                     echo "✓ Etapa 'extract' concluída"
                 else
                     echo "✗ Falha na etapa 'extract'"
-                    send_webhook "error" "Falha na extração do backup: $BACKUP_FILE"
                     cleanup_temp_files
                     exit 1
                 fi
@@ -377,10 +303,9 @@ if [[ "$SPECIFIC_STEP" != "all" ]]; then
                 if execute_restore; then
                     save_checkpoint "restore" "completed"
                     echo "✓ Etapa 'restore' concluída"
-                    send_webhook "restore" "Restore do backup $BACKUP_FILE concluído com sucesso"
+                    send_webhook "success" "Restore concluído" "Restore do backup $BACKUP_FILE concluído com sucesso" "R000" "$BACKUP_FILE"
                 else
                     echo "✗ Falha na etapa 'restore'"
-                    send_webhook "error" "Falha no restore do backup: $BACKUP_FILE"
                     cleanup_temp_files
                     exit 1
                 fi
@@ -408,7 +333,6 @@ else
             echo "✓ Download concluído"
         else
             echo "✗ Falha no download"
-            send_webhook "error" "Falha no download do backup: $BACKUP_FILE"
             cleanup_temp_files
             exit 1
         fi
@@ -424,7 +348,6 @@ else
             echo "✓ Extração concluída"
         else
             echo "✗ Falha na extração"
-            send_webhook "error" "Falha na extração do backup: $BACKUP_FILE"
             cleanup_temp_files
             exit 1
         fi
@@ -438,16 +361,15 @@ else
         if execute_restore; then
             save_checkpoint "restore" "completed"
             echo "✓ Restore concluído"
-            send_webhook "restore" "Restore do backup $BACKUP_FILE concluído com sucesso"
         else
             echo "✗ Falha no restore"
-            send_webhook "error" "Falha no restore do backup: $BACKUP_FILE"
             cleanup_temp_files
             exit 1
         fi
     fi
     
     echo "✓ Processo completo de restore finalizado com sucesso!"
+    send_webhook "success" "Processo de restore concluído" "Restore completo do backup $BACKUP_FILE finalizado com sucesso" "R000" "$BACKUP_FILE"
 fi
 
 # Limpeza de arquivos temporários e checkpoints

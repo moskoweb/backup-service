@@ -3,71 +3,15 @@
 # Carrega as variáveis de ambiente
 source "$(dirname "$0")/../.env"
 
-# ===== FUNÇÕES DE CHECKPOINT =====
-# Diretório para armazenar checkpoints
+# Carrega funções auxiliares
+source "$(dirname "$0")/helpers.sh"
+
+# ===== CONFIGURAÇÕES ESPECÍFICAS DO BACKUP =====
+# Diretório para armazenar checkpoints específicos do backup
 CHECKPOINT_DIR="$TMP_BACKUP_PATH/.checkpoints"
 mkdir -p "$CHECKPOINT_DIR"
 
-# Função para salvar checkpoint
-save_checkpoint() {
-    local step="$1"
-    local data="$2"
-    # Usa a data do backup atual para manter consistência
-    local checkpoint_file="$CHECKPOINT_DIR/backup-$DATE-$step.checkpoint"
-    
-    echo "timestamp=$(date -Iseconds)" > "$checkpoint_file"
-    echo "step=$step" >> "$checkpoint_file"
-    echo "backup_type=$BACKUP_TYPE" >> "$checkpoint_file"
-    echo "date=$DATE" >> "$checkpoint_file"
-    echo "tmp_dir=$TMP_DIR" >> "$checkpoint_file"
-    echo "archive_path=$ARCHIVE_PATH" >> "$checkpoint_file"
-    echo "filename=$FILENAME" >> "$checkpoint_file"
-    
-    if [[ -n "$data" ]]; then
-        echo "data=$data" >> "$checkpoint_file"
-    fi
-    
-    echo "✓ Checkpoint salvo: $step"
-}
 
-# Função para verificar se checkpoint existe
-check_checkpoint() {
-    local step="$1"
-    # Usa a data do backup atual para manter consistência
-    local checkpoint_file="$CHECKPOINT_DIR/backup-$DATE-$step.checkpoint"
-    
-    if [[ -f "$checkpoint_file" ]]; then
-        # Carrega variáveis do checkpoint
-        source "$checkpoint_file"
-        return 0
-    fi
-    return 1
-}
-
-# Função para limpar checkpoints antigos
-cleanup_checkpoints() {
-    local success="$1"
-    
-    if [[ "$success" == "true" ]]; then
-        # Remove checkpoints do dia atual em caso de sucesso
-        rm -f "$CHECKPOINT_DIR/backup-$DATE-"*.checkpoint
-        echo "✓ Checkpoints limpos após sucesso"
-    fi
-    
-    # Remove checkpoints com mais de 7 dias
-    find "$CHECKPOINT_DIR" -name "*.checkpoint" -mtime +7 -delete 2>/dev/null
-}
-
-# Função para verificar se arquivo existe e tem tamanho válido
-validate_file() {
-    local file="$1"
-    local min_size="${2:-1024}"  # Tamanho mínimo padrão: 1KB
-    
-    if [[ -f "$file" ]] && [[ $(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null || echo 0) -gt $min_size ]]; then
-        return 0
-    fi
-    return 1
-}
 
 # ===== SISTEMA DE PARÂMETROS =====
 # Uso: backup.sh [tipo_backup] [--step=etapa]
@@ -217,6 +161,7 @@ execute_database_backup() {
     
     if [[ $backup_success -ne 0 ]]; then
         echo "Erro: Falha ao executar backup do banco de dados"
+        send_webhook "error" "Falha no backup do banco de dados" "Erro durante a execução do backup $BACKUP_TYPE" "B001"
         return 1
     fi
     
@@ -264,6 +209,7 @@ execute_compression() {
     # Verifica se houve erro no tar ou no gzip
     if [[ ${PIPESTATUS[0]} -ne 0 || ${PIPESTATUS[1]} -ne 0 ]]; then
         echo "Erro: Falha ao criar arquivo compactado"
+        send_webhook "error" "Falha na compactação do backup" "Erro durante a compactação do arquivo $FILENAME" "B002" "$FILENAME"
         return 1
     fi
     
@@ -314,6 +260,7 @@ execute_upload() {
     
     if [[ $? -ne 0 ]]; then
         echo "Erro: Falha ao enviar backup para R2"
+        send_webhook "error" "Falha no upload para R2" "Erro ao enviar arquivo $FILENAME para o bucket $S3_BUCKET" "B003" "$FILENAME"
         return 1
     fi
     
@@ -332,8 +279,10 @@ execute_incremental_backup() {
                        grep "full" | sort | tail -n 1 | awk '{print $4}')
     
     if [[ -z "$latest_full" ]]; then
-        echo "Erro: Nenhum backup completo encontrado. Abortando backup incremental."
-        return 1
+        echo "Aviso: Nenhum backup completo encontrado. Mudando para backup completo..."
+        BACKUP_TYPE="full"
+        execute_database_backup
+        return $?
     fi
     
     echo "Usando backup base: $latest_full"
@@ -347,6 +296,7 @@ execute_incremental_backup() {
     
     if [[ $? -ne 0 ]]; then
         echo "Erro: Falha ao baixar backup base do R2"
+        send_webhook "error" "Falha no backup do banco de dados" "Erro ao baixar backup base $latest_full do R2 para backup incremental" "B001" "$latest_full"
         rm -rf "$base_dir"
         return 1
     fi
@@ -355,6 +305,7 @@ execute_incremental_backup() {
     tar -xzf "$base_dir/$latest_full" -C "$base_dir"
     if [[ $? -ne 0 ]]; then
         echo "Erro: Falha ao extrair backup base"
+        send_webhook "error" "Falha no backup do banco de dados" "Erro ao extrair backup base $latest_full para backup incremental" "B001" "$latest_full"
         rm -rf "$base_dir"
         return 1
     fi
@@ -535,6 +486,7 @@ backup_with_mydumper() {
     
     if [[ $result -ne 0 ]]; then
         echo "Erro: Falha ao executar mydumper"
+        send_webhook "error" "Falha no backup do banco de dados" "Erro durante execução do mydumper para backup do banco de dados" "B001"
         return 1
     fi
     
@@ -656,11 +608,7 @@ else
 fi
 
 # Envia webhook de sucesso
-if [[ "$WEBHOOK_EVENTS" == *"success"* ]]; then
-    curl -X POST -H "Content-Type: application/json" \
-         -d '{"event":"backup_success","type":"'"$BACKUP_TYPE"'","file":"'"$FILENAME"'","size":"'"$(stat -f%z "$ARCHIVE_PATH" 2>/dev/null || echo "unknown")"'","timestamp":"'"$(date -Iseconds)"'"}' \
-         "$WEBHOOK_URL" 2>/dev/null
-fi
+send_webhook "success" "Backup concluído com sucesso" "Backup $BACKUP_TYPE finalizado" "B000" "$FILENAME"
 
 # Limpeza dos arquivos temporários
 echo "Limpando arquivos temporários..."

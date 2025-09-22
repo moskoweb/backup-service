@@ -3,63 +3,18 @@
 # Carrega variáveis de ambiente
 source "$(dirname "$0")/../.env"
 
-# SISTEMA DE CHECKPOINTS PARA CLEANUP
+# Carrega funções auxiliares
+source "$(dirname "$0")/helpers.sh"
 
-# Diretório para armazenar checkpoints
+# ===== CONFIGURAÇÕES ESPECÍFICAS DO CLEANUP =====
+# Diretório para armazenar checkpoints específicos do cleanup
 CHECKPOINT_DIR="$TMP_BACKUP_PATH/cleanup-checkpoints"
 mkdir -p "$CHECKPOINT_DIR"
 
-# Função para salvar checkpoint
-save_checkpoint() {
-    local step="$1"
-    local status="$2"
-    local checkpoint_file="$CHECKPOINT_DIR/cleanup-$(date +%Y-%m-%d)-$step.checkpoint"
-    echo "$status|$(date -Iseconds)" > "$checkpoint_file"
-    echo "Checkpoint salvo: $step -> $status"
-}
-
-# Função para verificar checkpoint
-check_checkpoint() {
-    local step="$1"
-    local checkpoint_file="$CHECKPOINT_DIR/cleanup-$(date +%Y-%m-%d)-$step.checkpoint"
-    
-    if [[ -f "$checkpoint_file" ]]; then
-        local status=$(cut -d'|' -f1 "$checkpoint_file")
-        if [[ "$status" == "completed" ]]; then
-            return 0  # Checkpoint existe e está completo
-        fi
-    fi
-    return 1  # Checkpoint não existe ou não está completo
-}
-
-# Função para limpeza de checkpoints antigos
-cleanup_checkpoints() {
-    local force_cleanup="$1"
-    
-    if [[ "$force_cleanup" == "true" ]]; then
-        echo "Limpando todos os checkpoints do dia..."
-        rm -f "$CHECKPOINT_DIR"/cleanup-$(date +%Y-%m-%d)-*.checkpoint
-    else
-        # Remove checkpoints de mais de 7 dias
-        find "$CHECKPOINT_DIR" -name "cleanup-*.checkpoint" -mtime +7 -delete 2>/dev/null
-    fi
-}
-
-# Função para validação de arquivos
-validate_file() {
-    local file_path="$1"
-    
-    if [[ ! -f "$file_path" ]]; then
-        return 1
-    fi
-    
-    # Verifica se arquivo não está vazio
-    if [[ ! -s "$file_path" ]]; then
-        return 1
-    fi
-    
-    return 0
-}
+# Configurações específicas do cleanup
+# -----------------------------------------------------------------------------
+# As funções de checkpoint agora são fornecidas pelo helpers.sh
+# e automaticamente detectam e incluem variáveis específicas do script
 
 # SISTEMA DE PARÂMETROS
 
@@ -140,6 +95,7 @@ execute_list() {
     
     if [[ $? -ne 0 ]]; then
         echo "Erro: Falha ao listar arquivos no R2"
+        send_webhook "error" "Falha na listagem de arquivos" "Erro durante listagem de arquivos no bucket $S3_BUCKET" "C001"
         rm -f "$file_list"
         return 1
     fi
@@ -147,6 +103,7 @@ execute_list() {
     # Verifica se arquivo de lista foi criado e não está vazio
     if ! validate_file "$file_list"; then
         echo "Erro: Lista de arquivos está vazia ou inválida"
+        send_webhook "error" "Falha na listagem de arquivos" "Nenhum arquivo encontrado no bucket $S3_BUCKET/$S3_FOLDER" "C001"
         rm -f "$file_list"
         return 1
     fi
@@ -297,26 +254,9 @@ execute_verify() {
     return 0
 }
 
-# Função para envio de webhooks
-send_webhook() {
-    local event="$1"
-    local message="$2"
-    
-    if [[ -n "$WEBHOOK_URL" && "$WEBHOOK_EVENTS" == *"$event"* ]]; then
-        curl -X POST -H "Content-Type: application/json" \
-             -d '{"event":"'"$event"'","message":"'"$message"'","timestamp":"'"$(date -Iseconds)"'"}' \
-             "$WEBHOOK_URL" 2>/dev/null
-    fi
-}
 
-# Função para limpeza de arquivos temporários
-cleanup_temp_files() {
-    echo "Limpando arquivos temporários..."
-    rm -f "$TMP_BACKUP_PATH"/cleanup-files-*.txt
-    rm -f "$TMP_BACKUP_PATH"/cleanup-removals-*.log
-    rm -f "$TMP_BACKUP_PATH"/cleanup-*.path
-    rm -f "$TMP_BACKUP_PATH"/cleanup-stats.txt
-}
+
+
 
 echo "Iniciando processo de limpeza de backups antigos..."
 
@@ -335,11 +275,10 @@ execute_cleanup_step() {
             
             if execute_list; then
                 save_checkpoint "list" "completed"
-                send_webhook "cleanup" "Listagem de arquivos concluída"
                 return 0
             else
                 save_checkpoint "list" "failed"
-                send_webhook "error" "Falha na listagem de arquivos"
+                send_webhook "error" "Falha na listagem de arquivos" "Erro durante listagem de arquivos no bucket $S3_BUCKET" "C001"
                 return 1
             fi
             ;;
@@ -352,11 +291,10 @@ execute_cleanup_step() {
             
             if execute_delete; then
                 save_checkpoint "delete" "completed"
-                send_webhook "cleanup" "Remoção de arquivos concluída"
                 return 0
             else
                 save_checkpoint "delete" "failed"
-                send_webhook "error" "Falha na remoção de arquivos"
+                send_webhook "error" "Falha na remoção de arquivos" "Erro durante remoção de arquivos antigos no bucket $S3_BUCKET" "C002"
                 return 1
             fi
             ;;
@@ -369,11 +307,10 @@ execute_cleanup_step() {
             
             if execute_verify; then
                 save_checkpoint "verify" "completed"
-                send_webhook "cleanup" "Verificação final concluída"
                 return 0
             else
                 save_checkpoint "verify" "failed"
-                send_webhook "error" "Falha na verificação final"
+                send_webhook "error" "Falha na verificação final" "Erro durante verificação final de limpeza no bucket $S3_BUCKET" "C003"
                 return 1
             fi
             ;;
@@ -403,6 +340,7 @@ if [[ "$SPECIFIC_STEP" == "all" ]]; then
     
     echo ""
     echo "✓ Processo completo de limpeza finalizado com sucesso!"
+    send_webhook "success" "Limpeza concluída com sucesso" "Limpeza completa finalizada com sucesso" "C000"
     
 else
     echo "Executando etapa específica: $SPECIFIC_STEP"
