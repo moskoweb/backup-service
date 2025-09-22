@@ -488,10 +488,7 @@ backup_with_mydumper() {
     # Otimizações de performance para backup remoto
     mydumper_cmd+=" --rows=10000"
     mydumper_cmd+=" --threads=$cpu_threads"
-    mydumper_cmd+=" --chunk-filesize=1024"
     mydumper_cmd+=" --build-empty-files"
-    mydumper_cmd+=" --single-transaction"
-    mydumper_cmd+=" --trx-consistency-only"
     
     # Se DB_DATABASE está definido, faz backup apenas desse banco
     if [[ -n "$DB_DATABASE" ]]; then
