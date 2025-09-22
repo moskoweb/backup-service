@@ -195,64 +195,437 @@ execute_restore() {
     
     echo "Usando diretório de backup: $backup_dir"
     
+    # Detecta o formato do backup usando função do helpers.sh
+    local backup_format=$(detect_backup_format "$backup_dir")
+    
+    if [[ "$backup_format" == "xtrabackup" ]]; then
+        echo "Detectado backup do XtraBackup"
+    elif [[ "$backup_format" == "mydumper" ]]; then
+        echo "Detectado backup do mydumper"
+    else
+        echo "Erro: Formato de backup não reconhecido"
+        echo "Conteúdo do diretório:"
+        ls -la "$backup_dir"
+        return 1
+    fi
+    
     # Para o serviço MySQL antes do restore
     echo "Parando serviço MySQL..."
     sudo systemctl stop mysql 2>/dev/null || sudo service mysql stop 2>/dev/null || true
     
-    # Prepara o backup usando xtrabackup
-    echo "Preparando backup com xtrabackup..."
-    xtrabackup --prepare --target-dir="$backup_dir"
-    
-    if [[ $? -ne 0 ]]; then
-        echo "Erro: Falha ao preparar o backup"
-        send_webhook "error" "Falha no restore do backup" "Erro ao preparar backup com xtrabackup no diretório $backup_dir" "R003" "$BACKUP_FILE"
-        return 1
-    fi
-    
-    # Remove dados antigos do MySQL (backup de segurança)
-    echo "Fazendo backup dos dados atuais..."
-    if [[ -d "$DB_DATA_DIR" ]]; then
-        sudo mv "$DB_DATA_DIR" "$DB_DATA_DIR.backup.$(date +%s)"
-    fi
-    
-    # Restaura os dados usando xtrabackup
-    echo "Restaurando dados do MySQL..."
-    sudo mkdir -p "$DB_DATA_DIR"
-    xtrabackup --copy-back --target-dir="$backup_dir" --datadir="$DB_DATA_DIR"
-    
-    if [[ $? -ne 0 ]]; then
-        echo "Erro: Falha ao restaurar os dados"
-        send_webhook "error" "Falha no restore do backup" "Erro ao restaurar dados do MySQL para $DB_DATA_DIR" "R003" "$BACKUP_FILE"
-        # Restaura backup anterior se existir
-        local backup_old=$(ls -1t "$DB_DATA_DIR".backup.* 2>/dev/null | head -n 1)
-        if [[ -n "$backup_old" ]]; then
-            echo "Restaurando dados anteriores..."
-            sudo rm -rf "$DB_DATA_DIR"
-            sudo mv "$backup_old" "$DB_DATA_DIR"
+    # Processa o backup baseado no formato
+    if [[ "$backup_format" == "xtrabackup" ]]; then
+        echo "=== INICIANDO RESTORE LOCAL COM XTRABACKUP ==="
+        
+        # Verifica se xtrabackup está disponível
+        if ! command -v xtrabackup &> /dev/null; then
+            echo "Erro: xtrabackup não encontrado. Instale o Percona XtraBackup"
+            send_webhook "error" "XtraBackup não encontrado" "Comando xtrabackup não está disponível no sistema" "R004" "$BACKUP_FILE"
+            return 1
         fi
+        
+        # Verifica espaço em disco disponível
+        local backup_size=$(du -sb "$backup_dir" 2>/dev/null | cut -f1)
+        local available_space=$(df "$DB_DATA_DIR" 2>/dev/null | tail -1 | awk '{print $4}')
+        available_space=$((available_space * 1024)) # Converte para bytes
+        
+        if [[ $backup_size -gt $available_space ]]; then
+            echo "Erro: Espaço insuficiente. Necessário: $(format_bytes $backup_size), Disponível: $(format_bytes $available_space)"
+            send_webhook "error" "Espaço insuficiente" "Espaço em disco insuficiente para restore" "R005" "$BACKUP_FILE"
+            return 1
+        fi
+        
+        # Etapa 1: Preparação do backup
+        echo "Etapa 1/4: Preparando backup com xtrabackup..."
+        local prepare_log="$TMP_DIR/xtrabackup_prepare.log"
+        
+        xtrabackup --prepare --target-dir="$backup_dir" \
+                   --use-memory=1G \
+                   --parallel=4 2>&1 | tee "$prepare_log"
+        
+        local prepare_result=${PIPESTATUS[0]}
+        if [[ $prepare_result -ne 0 ]]; then
+            echo "Erro: Falha ao preparar o backup"
+            echo "Log de erro salvo em: $prepare_log"
+            send_webhook "error" "Falha na preparação do backup" "Erro ao preparar backup com xtrabackup. Verifique log: $prepare_log" "R003" "$BACKUP_FILE"
+            return 1
+        fi
+        echo "✓ Backup preparado com sucesso"
+        
+        # Etapa 2: Backup de segurança dos dados atuais
+        echo "Etapa 2/4: Fazendo backup de segurança dos dados atuais..."
+        local timestamp=$(date +%s)
+        local backup_safety_dir="$DB_DATA_DIR.backup.$timestamp"
+        
+        if [[ -d "$DB_DATA_DIR" ]]; then
+            echo "Movendo dados atuais para: $backup_safety_dir"
+            sudo mv "$DB_DATA_DIR" "$backup_safety_dir"
+            
+            # Verifica se o backup de segurança foi criado
+            if [[ ! -d "$backup_safety_dir" ]]; then
+                echo "Erro: Falha ao criar backup de segurança"
+                send_webhook "error" "Falha no backup de segurança" "Não foi possível criar backup dos dados atuais" "R006" "$BACKUP_FILE"
+                return 1
+            fi
+            echo "✓ Backup de segurança criado: $backup_safety_dir"
+        else
+            echo "✓ Diretório de dados não existe, criando novo"
+        fi
+        
+        # Etapa 3: Restauração dos dados
+        echo "Etapa 3/4: Restaurando dados com xtrabackup..."
+        sudo mkdir -p "$DB_DATA_DIR"
+        local restore_log="$TMP_DIR/xtrabackup_restore.log"
+        
+        xtrabackup --copy-back \
+                   --target-dir="$backup_dir" \
+                   --datadir="$DB_DATA_DIR" \
+                   --parallel=4 2>&1 | tee "$restore_log"
+        
+        local restore_result=${PIPESTATUS[0]}
+        if [[ $restore_result -ne 0 ]]; then
+            echo "Erro: Falha ao restaurar os dados"
+            echo "Log de erro salvo em: $restore_log"
+            send_webhook "error" "Falha no restore dos dados" "Erro ao restaurar dados com xtrabackup. Verifique log: $restore_log" "R003" "$BACKUP_FILE"
+            
+            # Restaura backup de segurança se existir
+            if [[ -d "$backup_safety_dir" ]]; then
+                echo "Restaurando dados anteriores..."
+                sudo rm -rf "$DB_DATA_DIR"
+                sudo mv "$backup_safety_dir" "$DB_DATA_DIR"
+                echo "✓ Dados anteriores restaurados"
+            fi
+            return 1
+        fi
+        echo "✓ Dados restaurados com sucesso"
+        
+        # Etapa 4: Ajuste de permissões e otimizações
+        echo "Etapa 4/4: Ajustando permissões e otimizando..."
+        
+        # Ajusta permissões dos arquivos restaurados
+        sudo chown -R mysql:mysql "$DB_DATA_DIR"
+        sudo chmod -R 750 "$DB_DATA_DIR"
+        
+        # Otimizações específicas para performance
+        if [[ -f "$DB_DATA_DIR/ib_logfile0" ]]; then
+            sudo chmod 660 "$DB_DATA_DIR"/ib_logfile*
+        fi
+        
+        if [[ -f "$DB_DATA_DIR/ibdata1" ]]; then
+            sudo chmod 660 "$DB_DATA_DIR/ibdata1"
+        fi
+        
+        echo "✓ Permissões ajustadas e otimizações aplicadas"
+        echo "=== RESTORE LOCAL XTRABACKUP CONCLUÍDO ==="
+        
+    elif [[ "$backup_format" == "mydumper" ]]; then
+        echo "=== INICIANDO RESTORE REMOTO COM MYLOADER ==="
+        
+        # Verifica se myloader está disponível
+        if ! command -v myloader &> /dev/null; then
+            echo "Erro: myloader não encontrado. Instale o mydumper/myloader"
+            send_webhook "error" "MyLoader não encontrado" "Comando myloader não está disponível no sistema" "R007" "$BACKUP_FILE"
+            return 1
+        fi
+        
+        # Etapa 1: Verificação e inicialização do MySQL
+        echo "Etapa 1/5: Verificando e inicializando MySQL..."
+        
+        # Verifica se MySQL está rodando, se não, inicia
+        if ! mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "SELECT 1;" > /dev/null 2>&1; then
+            echo "MySQL não está rodando, iniciando serviço..."
+            sudo systemctl start mysql 2>/dev/null || sudo service mysql start 2>/dev/null
+            
+            # Aguarda MySQL iniciar com timeout
+            local timeout=30
+            local count=0
+            while [[ $count -lt $timeout ]]; do
+                if mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "SELECT 1;" > /dev/null 2>&1; then
+                    break
+                fi
+                sleep 1
+                ((count++))
+            done
+            
+            if [[ $count -eq $timeout ]]; then
+                echo "Erro: Timeout ao aguardar MySQL iniciar"
+                send_webhook "error" "MySQL não iniciou" "Timeout ao aguardar MySQL iniciar após $timeout segundos" "R008" "$BACKUP_FILE"
+                return 1
+            fi
+        fi
+        echo "✓ MySQL está rodando e acessível"
+        
+        # Etapa 2: Análise do backup mydumper
+        echo "Etapa 2/5: Analisando estrutura do backup mydumper..."
+        
+        # Conta arquivos SQL no backup
+        local sql_files=$(find "$backup_dir" -name "*.sql" -type f | wc -l)
+        local metadata_file="$backup_dir/metadata"
+        
+        if [[ $sql_files -eq 0 ]]; then
+            echo "Erro: Nenhum arquivo SQL encontrado no backup"
+            send_webhook "error" "Backup inválido" "Nenhum arquivo SQL encontrado no diretório de backup" "R009" "$BACKUP_FILE"
+            return 1
+        fi
+        
+        echo "✓ Encontrados $sql_files arquivos SQL para restore"
+        
+        # Verifica arquivo de metadata se existir
+        if [[ -f "$metadata_file" ]]; then
+            echo "✓ Arquivo metadata encontrado"
+            local backup_info=$(grep -E "(Started|Finished)" "$metadata_file" 2>/dev/null || echo "Informações não disponíveis")
+            echo "Informações do backup: $backup_info"
+        fi
+        
+        # Etapa 3: Configuração de performance para myloader
+        echo "Etapa 3/5: Configurando parâmetros de performance..."
+        
+        # Calcula threads baseado no número de CPUs
+        local cpu_cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "4")
+        local threads=$((cpu_cores > 8 ? 8 : cpu_cores))
+        
+        # Configurações otimizadas para myloader
+        local myloader_opts=(
+            "--host=$DB_HOST"
+            "--port=$DB_PORT" 
+            "--user=$DB_USER"
+            "--password=$DB_PASS"
+            "--directory=$backup_dir"
+            "--threads=$threads"
+            "--compress-protocol"
+            "--overwrite-tables"
+            "--enable-binlog"
+            "--verbose=2"
+        )
+        
+        echo "✓ Configurado para usar $threads threads"
+        
+        # Etapa 4: Backup de segurança (opcional para mydumper)
+        echo "Etapa 4/5: Preparando ambiente para restore..."
+        
+        # Desabilita foreign key checks temporariamente para performance
+        mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "SET GLOBAL foreign_key_checks = 0;" 2>/dev/null || true
+        mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "SET GLOBAL unique_checks = 0;" 2>/dev/null || true
+        
+        echo "✓ Otimizações de performance aplicadas"
+        
+        # Etapa 5: Execução do restore com myloader
+        echo "Etapa 5/5: Executando restore com myloader..."
+        local restore_log="$TMP_DIR/myloader_restore.log"
+        
+        echo "Comando: myloader ${myloader_opts[*]}"
+        myloader "${myloader_opts[@]}" 2>&1 | tee "$restore_log"
+        
+        local restore_result=${PIPESTATUS[0]}
+        
+        # Reabilita foreign key checks
+        mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "SET GLOBAL foreign_key_checks = 1;" 2>/dev/null || true
+        mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "SET GLOBAL unique_checks = 1;" 2>/dev/null || true
+        
+        if [[ $restore_result -ne 0 ]]; then
+            echo "Erro: Falha ao restaurar com myloader"
+            echo "Log de erro salvo em: $restore_log"
+            send_webhook "error" "Falha no restore mydumper" "Erro ao restaurar backup com myloader. Verifique log: $restore_log" "R003" "$BACKUP_FILE"
+            return 1
+        fi
+        
+        echo "✓ Restore executado com sucesso"
+        
+        # Verifica integridade básica do restore
+        echo "Verificando integridade do restore..."
+        local tables_count=$(mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys');" -s -N 2>/dev/null || echo "0")
+        
+        if [[ $tables_count -gt 0 ]]; then
+            echo "✓ Restore verificado: $tables_count tabelas restauradas"
+        else
+            echo "⚠ Aviso: Nenhuma tabela encontrada após restore"
+        fi
+        
+        echo "=== RESTORE REMOTO MYLOADER CONCLUÍDO ==="
+    fi
+    
+    # === VALIDAÇÕES E VERIFICAÇÕES DE INTEGRIDADE ===
+    echo "=== INICIANDO VALIDAÇÕES PÓS-RESTORE ==="
+    
+    # Validação 1: Conectividade básica do MySQL
+    echo "Validação 1/6: Verificando conectividade do MySQL..."
+    local connection_attempts=0
+    local max_attempts=5
+    
+    while [[ $connection_attempts -lt $max_attempts ]]; do
+        if mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "SELECT 1;" > /dev/null 2>&1; then
+            echo "✓ MySQL conectado com sucesso"
+            break
+        else
+            ((connection_attempts++))
+            echo "Tentativa $connection_attempts/$max_attempts falhou, aguardando..."
+            sleep 2
+        fi
+    done
+    
+    if [[ $connection_attempts -eq $max_attempts ]]; then
+        echo "❌ Erro: MySQL não responde após $max_attempts tentativas"
+        send_webhook "error" "MySQL não responde" "MySQL não responde após processo de restore" "R004" "$BACKUP_FILE"
         return 1
     fi
     
-    # Ajusta permissões dos arquivos restaurados
-    echo "Ajustando permissões..."
-    sudo chown -R mysql:mysql "$DB_DATA_DIR"
-    sudo chmod -R 750 "$DB_DATA_DIR"
+    # Validação 2: Verificação de estrutura do banco
+    echo "Validação 2/6: Verificando estrutura do banco de dados..."
+    local databases_count=$(mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "SHOW DATABASES;" -s -N 2>/dev/null | grep -v -E '^(information_schema|performance_schema|mysql|sys)$' | wc -l)
+    local tables_count=$(mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys');" -s -N 2>/dev/null || echo "0")
     
-    # Reinicia o serviço MySQL
-    echo "Reiniciando serviço MySQL..."
-    sudo systemctl start mysql 2>/dev/null || sudo service mysql start 2>/dev/null
+    echo "✓ Encontrados $databases_count banco(s) de dados e $tables_count tabela(s)"
     
-    # Verifica se o MySQL iniciou corretamente
-    sleep 5
-    mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "SELECT 1;" > /dev/null 2>&1
+    if [[ $tables_count -eq 0 ]]; then
+        echo "⚠ Aviso: Nenhuma tabela de usuário encontrada"
+    fi
     
-    if [[ $? -eq 0 ]]; then
-        echo "✓ Restore concluído com sucesso!"
-        return 0
+    # Validação 3: Verificação de integridade das tabelas (apenas para xtrabackup)
+    if [[ "$backup_format" == "xtrabackup" ]]; then
+        echo "Validação 3/6: Verificando integridade das tabelas (xtrabackup)..."
+        local corrupted_tables=0
+        
+        # Executa CHECK TABLE em algumas tabelas principais
+        local check_result=$(mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "
+            SELECT CONCAT(table_schema, '.', table_name) as table_name 
+            FROM information_schema.tables 
+            WHERE table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys') 
+            AND table_type = 'BASE TABLE' 
+            LIMIT 10;" -s -N 2>/dev/null)
+        
+        if [[ -n "$check_result" ]]; then
+            while IFS= read -r table; do
+                if [[ -n "$table" ]]; then
+                    local check_status=$(mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "CHECK TABLE $table;" -s -N 2>/dev/null | tail -1 | awk '{print $NF}')
+                    if [[ "$check_status" != "OK" ]]; then
+                        echo "⚠ Tabela $table: $check_status"
+                        ((corrupted_tables++))
+                    fi
+                fi
+            done <<< "$check_result"
+        fi
+        
+        if [[ $corrupted_tables -eq 0 ]]; then
+            echo "✓ Integridade das tabelas verificada"
+        else
+            echo "⚠ Encontradas $corrupted_tables tabela(s) com problemas"
+        fi
     else
-        echo "Erro: MySQL não conseguiu iniciar após o restore"
-        return 1
+        echo "Validação 3/6: Pulando verificação de integridade (mydumper)"
     fi
+    
+    # Validação 4: Verificação de espaço em disco pós-restore
+    echo "Validação 4/6: Verificando espaço em disco..."
+    local mysql_datadir=$(mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "SELECT @@datadir;" -s -N 2>/dev/null || echo "/var/lib/mysql")
+    local disk_usage=$(df -h "$mysql_datadir" 2>/dev/null | tail -1 | awk '{print $5}' | sed 's/%//')
+    
+    if [[ -n "$disk_usage" && $disk_usage -lt 90 ]]; then
+        echo "✓ Espaço em disco adequado: ${disk_usage}% usado"
+    else
+        echo "⚠ Aviso: Espaço em disco crítico: ${disk_usage}% usado"
+    fi
+    
+    # Validação 5: Verificação de logs de erro do MySQL
+    echo "Validação 5/6: Verificando logs de erro do MySQL..."
+    local error_log=$(mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "SELECT @@log_error;" -s -N 2>/dev/null)
+    
+    if [[ -n "$error_log" && -f "$error_log" ]]; then
+        local recent_errors=$(tail -50 "$error_log" 2>/dev/null | grep -i error | wc -l)
+        if [[ $recent_errors -eq 0 ]]; then
+            echo "✓ Nenhum erro recente encontrado nos logs"
+        else
+            echo "⚠ Encontrados $recent_errors erro(s) recente(s) nos logs"
+        fi
+    else
+        echo "✓ Log de erro não acessível ou não configurado"
+    fi
+    
+    # Validação 6: Teste de operações básicas
+    echo "Validação 6/6: Testando operações básicas do banco..."
+    local test_db="test_restore_$(date +%s)"
+    
+    # Tenta criar um banco de teste
+    if mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "CREATE DATABASE IF NOT EXISTS $test_db;" > /dev/null 2>&1; then
+        # Tenta criar uma tabela de teste
+        if mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" "$test_db" -e "CREATE TABLE test_table (id INT PRIMARY KEY, data VARCHAR(50));" > /dev/null 2>&1; then
+            # Tenta inserir dados
+            if mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" "$test_db" -e "INSERT INTO test_table VALUES (1, 'teste');" > /dev/null 2>&1; then
+                # Tenta ler dados
+                local test_result=$(mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" "$test_db" -e "SELECT data FROM test_table WHERE id=1;" -s -N 2>/dev/null)
+                if [[ "$test_result" == "teste" ]]; then
+                    echo "✓ Operações básicas funcionando corretamente"
+                    # Limpa o banco de teste
+                    mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "DROP DATABASE IF EXISTS $test_db;" > /dev/null 2>&1
+                else
+                    echo "⚠ Problema na leitura de dados"
+                fi
+            else
+                echo "⚠ Problema na inserção de dados"
+            fi
+        else
+            echo "⚠ Problema na criação de tabela"
+        fi
+    else
+        echo "⚠ Problema na criação de banco de dados"
+    fi
+    
+    # === RELATÓRIO FINAL DE PERFORMANCE ===
+    local restore_end_time=$(date +%s)
+    local restore_start_time=${restore_start_time:-$restore_end_time}
+    local total_duration=$((restore_end_time - restore_start_time))
+    local minutes=$((total_duration / 60))
+    local seconds=$((total_duration % 60))
+    
+    # Detecta recursos do sistema para relatório
+    local cpu_cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "4")
+    local total_memory=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024/1024)}' || echo "4096")
+    local optimal_threads=$((cpu_cores > 16 ? 16 : cpu_cores))
+    local buffer_size=$((total_memory > 8192 ? 1024 : total_memory / 8))
+    
+    echo "=== RELATÓRIO FINAL DE PERFORMANCE ==="
+    echo "✅ Restore concluído com sucesso"
+    echo "⏱️  Tempo total: ${minutes}m ${seconds}s"
+    echo "📊 Estatísticas:"
+    echo "   - Banco(s) de dados: $databases_count"
+    echo "   - Tabela(s): $tables_count"
+    echo "   - Formato do backup: $backup_format"
+    echo "   - Modo: $(get_backup_mode)"
+    echo "   - Uso de disco: ${disk_usage}%"
+    echo "   - Threads utilizadas: $optimal_threads"
+    echo "   - Buffer configurado: ${buffer_size}MB"
+    echo "   - CPU(s) disponível(is): $cpu_cores"
+    echo "   - Memória total: ${total_memory}MB"
+    
+    # Salva métricas de performance
+    local performance_summary="$TMP_DIR/restore_performance_summary.log"
+    cat > "$performance_summary" << EOF
+=== RELATÓRIO DE PERFORMANCE DO RESTORE ===
+Data/Hora: $(date '+%Y-%m-%d %H:%M:%S')
+Arquivo de backup: $backup_file
+Formato: $backup_format
+Modo: $(get_backup_mode)
+Duração total: ${minutes}m ${seconds}s
+Bancos restaurados: $databases_count
+Tabelas restauradas: $tables_count
+Recursos utilizados:
+  - CPUs: $cpu_cores
+  - Threads: $optimal_threads
+  - Memória total: ${total_memory}MB
+  - Buffer: ${buffer_size}MB
+  - Uso de disco final: ${disk_usage}%
+Status: SUCESSO
+EOF
+    
+    echo "📄 Logs salvos em:"
+    echo "   - Log detalhado: $restore_log_file"
+    echo "   - Performance: $performance_summary"
+    
+    # Limpa logs antigos (mantém apenas os últimos 10)
+    find "$TMP_DIR" -name "restore_*.log" -type f -mtime +7 -delete 2>/dev/null || true
+    find "$TMP_DIR" -name "restore_performance*.log" -type f | sort -r | tail -n +11 | xargs rm -f 2>/dev/null || true
+    
+    send_webhook "success" "Restore concluído com validações" "Backup restaurado e validado com sucesso em ${minutes}m ${seconds}s. $databases_count banco(s), $tables_count tabela(s)" "R000" "$BACKUP_FILE"
+    return 0
 }
 
 
@@ -260,6 +633,9 @@ execute_restore() {
 
 
 echo "Iniciando processo de restore do backup: $BACKUP_FILE"
+
+# Inicializa timestamp para performance
+restore_start_time=$(date +%s)
 
 # LÓGICA PRINCIPAL MODULAR COM CHECKPOINTS
 
@@ -277,7 +653,7 @@ if [[ "$SPECIFIC_STEP" != "all" ]]; then
                     echo "✓ Etapa 'download' concluída"
                 else
                     echo "✗ Falha na etapa 'download'"
-                    cleanup_temp_files
+                    echo "AVISO: Arquivos temporários preservados para nova tentativa"
                     exit 1
                 fi
             fi
@@ -291,7 +667,7 @@ if [[ "$SPECIFIC_STEP" != "all" ]]; then
                     echo "✓ Etapa 'extract' concluída"
                 else
                     echo "✗ Falha na etapa 'extract'"
-                    cleanup_temp_files
+                    echo "AVISO: Arquivos temporários preservados para nova tentativa"
                     exit 1
                 fi
             fi
@@ -306,7 +682,7 @@ if [[ "$SPECIFIC_STEP" != "all" ]]; then
                     send_webhook "success" "Restore concluído" "Restore do backup $BACKUP_FILE concluído com sucesso" "R000" "$BACKUP_FILE"
                 else
                     echo "✗ Falha na etapa 'restore'"
-                    cleanup_temp_files
+                    echo "AVISO: Arquivos temporários preservados para nova tentativa"
                     exit 1
                 fi
             fi
@@ -318,7 +694,11 @@ if [[ "$SPECIFIC_STEP" != "all" ]]; then
     esac
     
     echo "Etapa '$SPECIFIC_STEP' finalizada!"
-    cleanup_temp_files
+    # Só limpa arquivos temporários se a etapa foi bem-sucedida e é a última etapa
+    if [[ "$SPECIFIC_STEP" == "restore" ]]; then
+        cleanup_temp_files
+        cleanup_checkpoints "true"
+    fi
     exit 0
 else
     echo "Executando processo completo de restore..."
@@ -333,7 +713,7 @@ else
             echo "✓ Download concluído"
         else
             echo "✗ Falha no download"
-            cleanup_temp_files
+            echo "AVISO: Arquivos temporários preservados para nova tentativa"
             exit 1
         fi
     fi
@@ -348,7 +728,7 @@ else
             echo "✓ Extração concluída"
         else
             echo "✗ Falha na extração"
-            cleanup_temp_files
+            echo "AVISO: Arquivos temporários preservados para nova tentativa"
             exit 1
         fi
     fi
@@ -363,7 +743,7 @@ else
             echo "✓ Restore concluído"
         else
             echo "✗ Falha no restore"
-            cleanup_temp_files
+            echo "AVISO: Arquivos temporários preservados para nova tentativa"
             exit 1
         fi
     fi

@@ -253,6 +253,60 @@ log_message() {
 }
 
 # -----------------------------------------------------------------------------
+# Função para obter modo de backup do ambiente
+# -----------------------------------------------------------------------------
+# Retorna o modo de backup configurado no ambiente
+# Retorna:
+#   "local" para backup local com XtraBackup (padrão)
+#   "remote" para backup remoto com mydumper
+# -----------------------------------------------------------------------------
+get_backup_mode() {
+    echo "${BACKUP_MODE:-local}"
+}
+
+# -----------------------------------------------------------------------------
+# Função para detectar formato de backup
+# -----------------------------------------------------------------------------
+# Detecta o formato do backup baseado nos arquivos presentes
+# Parâmetros:
+#   $1: diretório do backup extraído
+# Retorna:
+#   "xtrabackup" se encontrar arquivos característicos do xtrabackup
+#   "mydumper" se encontrar arquivos característicos do mydumper
+#   "unknown" se não conseguir determinar
+# -----------------------------------------------------------------------------
+detect_backup_format() {
+    local backup_dir="$1"
+    
+    if [[ ! -d "$backup_dir" ]]; then
+        echo "unknown"
+        return 1
+    fi
+    
+    # Verifica se é backup xtrabackup (procura por arquivos característicos)
+    if [[ -f "$backup_dir/xtrabackup_checkpoints" ]] || \
+       [[ -f "$backup_dir/xtrabackup_info" ]] || \
+       [[ -f "$backup_dir/backup-my.cnf" ]] || \
+       [[ -d "$backup_dir/mysql" ]] || \
+       [[ -f "$backup_dir/ibdata1" ]]; then
+        echo "xtrabackup"
+        return 0
+    fi
+    
+    # Verifica se é backup mydumper (procura por arquivos .sql e metadata)
+    if [[ -f "$backup_dir/metadata" ]] || \
+       [[ $(find "$backup_dir" -name "*.sql" -type f | wc -l) -gt 0 ]] || \
+       [[ -f "$backup_dir/mydumper.log" ]]; then
+        echo "mydumper"
+        return 0
+    fi
+    
+    # Se não conseguir determinar, retorna unknown
+    echo "unknown"
+    return 1
+}
+
+# -----------------------------------------------------------------------------
 # Inicialização
 # -----------------------------------------------------------------------------
 
