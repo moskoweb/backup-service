@@ -108,12 +108,7 @@ execute_download() {
     # Download do backup do R2/S3 com timeout configurável
     local timeout=${TRANSFER_TIMEOUT:-300}
     echo "Baixando backup do R2 (timeout: ${timeout}s)..."
-    timeout "$timeout" aws s3 cp "s3://$S3_BUCKET/$S3_FOLDER/$BACKUP_FILE" "$TMP_DIR/" \
-        --endpoint-url "$S3_ENDPOINT" \
-        --cli-read-timeout 0 \
-        --multipart-threshold 64MB \
-        --multipart-chunksize 16MB \
-        --max-concurrent-requests 20
+    timeout "$timeout" aws s3 cp "s3://$S3_BUCKET/$S3_FOLDER/$BACKUP_FILE" "$TMP_DIR/" --endpoint-url "$S3_ENDPOINT"
     
     if [[ $? -ne 0 ]]; then
         echo "Erro: Falha ao baixar o backup do R2"

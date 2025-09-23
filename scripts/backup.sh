@@ -256,12 +256,7 @@ execute_upload() {
     local timeout=${TRANSFER_TIMEOUT:-300}
     echo "Fazendo upload do backup para o S3 (timeout: ${timeout}s)..."
     
-    timeout "$timeout" aws s3 cp "$ARCHIVE_PATH" "s3://$S3_BUCKET/$S3_FOLDER/$FILENAME" \
-        --endpoint-url "$S3_ENDPOINT" \
-        --cli-read-timeout 0 \
-        --multipart-threshold 64MB \
-        --multipart-chunksize 16MB \
-        --max-concurrent-requests 20
+    timeout "$timeout" aws s3 cp "$ARCHIVE_PATH" "s3://$S3_BUCKET/$S3_FOLDER/$FILENAME" --endpoint-url "$S3_ENDPOINT"
     
     if [[ $? -ne 0 ]]; then
         echo "Erro: Falha ao enviar backup para R2"
@@ -297,12 +292,7 @@ execute_incremental_backup() {
     mkdir -p "$base_dir"
     
     local timeout=${TRANSFER_TIMEOUT:-300}
-    timeout "$timeout" aws s3 cp "s3://$S3_BUCKET/$S3_FOLDER/$latest_full" "$base_dir/$latest_full" \
-        --endpoint-url="$S3_ENDPOINT" \
-        --cli-read-timeout 0 \
-        --multipart-threshold 64MB \
-        --multipart-chunksize 16MB \
-        --max-concurrent-requests 20
+    timeout "$timeout" aws s3 cp "s3://$S3_BUCKET/$S3_FOLDER/$latest_full" "$base_dir/$latest_full" --endpoint-url="$S3_ENDPOINT"
     
     if [[ $? -ne 0 ]]; then
         echo "Erro: Falha ao baixar backup base do R2"
