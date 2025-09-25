@@ -169,6 +169,25 @@ execute_extract() {
     if [[ ! -f "$backup_dir/xtrabackup_checkpoints" ]]; then
         echo "Aviso: Arquivo xtrabackup_checkpoints não encontrado. Verificando estrutura do backup..."
         ls -la "$backup_dir"
+        
+        # Procura por arquivos xtrabackup em subdiretórios
+        local xtrabackup_files=$(find "$backup_dir" -name "xtrabackup_checkpoints" -type f 2>/dev/null)
+        if [[ -n "$xtrabackup_files" ]]; then
+            echo "Arquivo xtrabackup_checkpoints encontrado em subdiretório:"
+            echo "$xtrabackup_files"
+            # Atualiza backup_dir para o diretório correto
+            backup_dir=$(dirname "$xtrabackup_files" | head -n 1)
+            echo "Usando diretório correto: $backup_dir"
+        else
+            echo "Arquivo xtrabackup_checkpoints não encontrado em nenhum subdiretório."
+            echo "Verificando se é backup mydumper..."
+            local sql_files=$(find "$backup_dir" -name "*.sql" -type f 2>/dev/null | wc -l)
+            if [[ $sql_files -gt 0 ]]; then
+                echo "Detectados $sql_files arquivos .sql - Este parece ser um backup mydumper"
+                echo "Para restaurar backup mydumper, use myloader em vez de xtrabackup"
+                return 1
+            fi
+        fi
     fi
     
     echo "✓ Extração concluída com sucesso!"
@@ -232,6 +251,16 @@ execute_restore() {
         if [[ $backup_size -gt $available_space ]]; then
             echo "Erro: Espaço insuficiente. Necessário: $(format_bytes $backup_size), Disponível: $(format_bytes $available_space)"
             send_webhook "error" "Espaço insuficiente" "Espaço em disco insuficiente para restore" "R005" "$BACKUP_FILE"
+            return 1
+        fi
+        
+        # Validação final antes do restore
+        if [[ ! -f "$backup_dir/xtrabackup_checkpoints" ]]; then
+            echo "Erro: Arquivo xtrabackup_checkpoints não encontrado em $backup_dir"
+            echo "Este backup não pode ser restaurado com xtrabackup."
+            echo "Conteúdo do diretório:"
+            ls -la "$backup_dir"
+            send_webhook "error" "Backup inválido para xtrabackup" "Arquivo xtrabackup_checkpoints não encontrado" "R007" "$BACKUP_FILE"
             return 1
         fi
         

@@ -144,6 +144,18 @@ execute_database_backup() {
                     --target-dir="$TMP_DIR"
             fi
             backup_success=$?
+            
+            # Valida se o backup xtrabackup foi criado corretamente
+            if [[ $backup_success -eq 0 ]]; then
+                if [[ ! -f "$TMP_DIR/xtrabackup_checkpoints" ]]; then
+                    echo "Erro: Backup xtrabackup concluído mas arquivo xtrabackup_checkpoints não foi criado"
+                    echo "Conteúdo do diretório de backup:"
+                    ls -la "$TMP_DIR"
+                    backup_success=1
+                else
+                    echo "✓ Arquivo xtrabackup_checkpoints criado com sucesso"
+                fi
+            fi
         fi
     else
         # Backup incremental
