@@ -363,10 +363,10 @@ build_xtrabackup_params() {
     
     # Se DB_DATABASE está definido, adiciona parâmetros para banco específico
     if [[ -n "$DB_DATABASE" ]]; then
-        echo "Configurado para backup do banco: $DB_DATABASE"
+        echo "Configurado para backup do banco: $DB_DATABASE" >&2
         params="--databases=$DB_DATABASE"
     else
-        echo "Fazendo backup completo de todos os bancos"
+        echo "Fazendo backup completo de todos os bancos" >&2
     fi
     
     echo "$params"
