@@ -138,6 +138,7 @@ Todos os scripts incluem ajuda integrada:
 ```bash
 # Atualizar sistema
 sudo apt update
+sudo apt install pigz -y
 
 # Para Modo Local (XtraBackup)
 wget https://repo.percona.com/apt/percona-release_latest.generic_all.deb

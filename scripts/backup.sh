@@ -195,10 +195,20 @@ execute_compression() {
     fi
     
     echo "Compactando backup..."
-    local compression=${COMPRESSION_LEVEL:-6}
-    echo "Compactando backup (nível de compressão: $compression)..."
+    local compression=${COMPRESSION_LEVEL:-3}  # Nível balanceado entre velocidade e compressão
     
-    tar -cf - -C "$TMP_DIR" . | gzip -$compression > "$ARCHIVE_PATH"
+    # Detecta número de CPUs para paralelização
+    local cpu_cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "4")
+    local threads=$((cpu_cores > 8 ? 8 : cpu_cores))  # Máximo 8 threads para evitar sobrecarga
+    
+    # Usa pigz se disponível (compressão paralela), senão tar com gzip integrado
+    if command -v pigz >/dev/null 2>&1; then
+        echo "Compactando backup com pigz (nível: $compression, threads: $threads)..." >&2
+        tar -cf - -C "$TMP_DIR" . | pigz -$compression -p $threads > "$ARCHIVE_PATH"
+    else
+        echo "Compactando backup com tar integrado (nível: $compression)..." >&2
+        tar -czf "$ARCHIVE_PATH" -C "$TMP_DIR" .
+    fi
     
     # Verifica se houve erro no tar ou no gzip
     if [[ ${PIPESTATUS[0]} -ne 0 || ${PIPESTATUS[1]} -ne 0 ]]; then
