@@ -154,68 +154,249 @@ execute_extract() {
         return 1
     fi
     
-    # Verifica se extração foi bem-sucedida
-    backup_dir=$(find "$TMP_DIR" -type d -name "*-*-*_*-*-*" | head -n 1)
+    # Localiza o diretório correto do backup
+    backup_dir=$(find_backup_directory "$TMP_DIR")
+    
     if [[ -z "$backup_dir" ]]; then
-        backup_dir=$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-        if [[ -z "$backup_dir" ]]; then
-            backup_dir="$TMP_DIR"
-        fi
+        echo "Erro: Não foi possível localizar o diretório do backup"
+        return 1
     fi
     
-    echo "Usando diretório de backup: $backup_dir"
-    
-    # Verifica se existe o arquivo xtrabackup_checkpoints
-    if [[ ! -f "$backup_dir/xtrabackup_checkpoints" ]]; then
-        echo "Aviso: Arquivo xtrabackup_checkpoints não encontrado. Verificando estrutura do backup..."
-        ls -la "$backup_dir"
-        
-        # Procura por arquivos xtrabackup em subdiretórios
-        local xtrabackup_files=$(find "$backup_dir" -name "xtrabackup_checkpoints" -type f 2>/dev/null)
-        if [[ -n "$xtrabackup_files" ]]; then
-            echo "Arquivo xtrabackup_checkpoints encontrado em subdiretório:"
-            echo "$xtrabackup_files"
-            # Atualiza backup_dir para o diretório correto
-            backup_dir=$(dirname "$xtrabackup_files" | head -n 1)
-            echo "Usando diretório correto: $backup_dir"
-        else
-            echo "Arquivo xtrabackup_checkpoints não encontrado em nenhum subdiretório."
-            echo "Verificando se é backup mydumper..."
-            local sql_files=$(find "$backup_dir" -name "*.sql" -type f 2>/dev/null | wc -l)
-            if [[ $sql_files -gt 0 ]]; then
-                echo "Detectados $sql_files arquivos .sql - Este parece ser um backup mydumper"
-                echo "Para restaurar backup mydumper, use myloader em vez de xtrabackup"
-                return 1
-            fi
-        fi
-    fi
+    echo "✓ Diretório do backup localizado: $backup_dir"
     
     echo "✓ Extração concluída com sucesso!"
     return 0
+}
+
+# Função para localizar o diretório correto do backup após extração
+find_backup_directory() {
+    local extract_dir="$1"
+    local backup_dir=""
+    
+    if [[ -z "$extract_dir" || ! -d "$extract_dir" ]]; then
+        echo "Erro: Diretório de extração inválido: $extract_dir" >&2
+        return 1
+    fi
+    
+    echo "Procurando diretório do backup em: $extract_dir" >&2
+    
+    # Estratégia 1: Procura diretamente por xtrabackup_checkpoints
+    local xtrabackup_files=$(find "$extract_dir" -name "xtrabackup_checkpoints" -type f 2>/dev/null)
+    if [[ -n "$xtrabackup_files" ]]; then
+        backup_dir=$(dirname "$xtrabackup_files" | head -n 1)
+        echo "✓ Backup xtrabackup encontrado via xtrabackup_checkpoints: $backup_dir" >&2
+        echo "$backup_dir"
+        return 0
+    fi
+    
+    # Estratégia 2: Procura por arquivos .sql (mydumper)
+    local sql_files=$(find "$extract_dir" -name "*.sql" -type f 2>/dev/null | head -n 1)
+    if [[ -n "$sql_files" ]]; then
+        backup_dir=$(dirname "$sql_files")
+        echo "✓ Backup mydumper encontrado via arquivos .sql: $backup_dir" >&2
+        echo "$backup_dir"
+        return 0
+    fi
+    
+    # Estratégia 3: Procura por arquivos típicos do MySQL/xtrabackup
+    local mysql_files=$(find "$extract_dir" -name "ibdata1" -o -name "ib_logfile*" -o -name "mysql" -type f -o -type d 2>/dev/null | head -n 1)
+    if [[ -n "$mysql_files" ]]; then
+        backup_dir=$(dirname "$mysql_files")
+        echo "✓ Backup encontrado via arquivos MySQL: $backup_dir" >&2
+        echo "$backup_dir"
+        return 0
+    fi
+    
+    # Estratégia 4: Procura por diretórios com padrão de data/hora
+    local date_dirs=$(find "$extract_dir" -mindepth 1 -maxdepth 2 -type d -name "*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*" 2>/dev/null | head -n 1)
+    if [[ -n "$date_dirs" ]]; then
+        backup_dir="$date_dirs"
+        echo "✓ Backup encontrado via padrão de data: $backup_dir" >&2
+        echo "$backup_dir"
+        return 0
+    fi
+    
+    # Estratégia 5: Procura pelo primeiro subdiretório não vazio
+    local subdirs=$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+    for subdir in $subdirs; do
+        local file_count=$(find "$subdir" -type f 2>/dev/null | wc -l)
+        if [[ $file_count -gt 0 ]]; then
+            backup_dir="$subdir"
+            echo "✓ Backup encontrado via primeiro subdiretório não vazio: $backup_dir" >&2
+            echo "$backup_dir"
+            return 0
+        fi
+    done
+    
+    # Estratégia 6: Se há arquivos diretamente no diretório de extração
+    local direct_files=$(find "$extract_dir" -maxdepth 1 -type f 2>/dev/null | wc -l)
+    if [[ $direct_files -gt 0 ]]; then
+        backup_dir="$extract_dir"
+        echo "✓ Backup encontrado diretamente no diretório de extração: $backup_dir" >&2
+        echo "$backup_dir"
+        return 0
+    fi
+    
+    echo "Erro: Não foi possível localizar o diretório do backup" >&2
+    echo "Estrutura do diretório de extração:" >&2
+    ls -la "$extract_dir" >&2 2>/dev/null || echo "Erro ao listar diretório" >&2
+    
+    return 1
+}
+
+# Função para detectar tipo de backup
+detect_backup_type() {
+    local backup_dir="$1"
+    
+    if [[ -z "$backup_dir" || ! -d "$backup_dir" ]]; then
+        echo "unknown"
+        return 1
+    fi
+    
+    # Verifica se é xtrabackup
+    if [[ -f "$backup_dir/xtrabackup_checkpoints" ]]; then
+        echo "xtrabackup"
+        return 0
+    fi
+    
+    # Verifica se é mydumper
+    local sql_files=$(find "$backup_dir" -name "*.sql" -type f 2>/dev/null | wc -l)
+    if [[ $sql_files -gt 0 ]]; then
+        echo "mydumper"
+        return 0
+    fi
+    
+    # Verifica se tem arquivos típicos do MySQL
+    if [[ -f "$backup_dir/ibdata1" ]] || [[ -d "$backup_dir/mysql" ]]; then
+        echo "mysql_raw"
+        return 0
+    fi
+    
+    echo "unknown"
+    return 1
+}
+
+# Função para preparar backup do xtrabackup
+prepare_xtrabackup_backup() {
+    local backup_dir="$1"
+    
+    if [[ -z "$backup_dir" || ! -d "$backup_dir" ]]; then
+        echo "Erro: Diretório de backup inválido: $backup_dir"
+        return 1
+    fi
+    
+    echo "Preparando backup xtrabackup em: $backup_dir"
+    
+    # Verifica se o backup já foi preparado
+    if [[ -f "$backup_dir/.xtrabackup_prepared" ]]; then
+        echo "✓ Backup já foi preparado anteriormente"
+        return 0
+    fi
+    
+    # Verifica arquivo xtrabackup_checkpoints
+    if [[ ! -f "$backup_dir/xtrabackup_checkpoints" ]]; then
+        echo "Erro: Arquivo xtrabackup_checkpoints não encontrado"
+        return 1
+    fi
+    
+    # Lê informações do checkpoint
+    local backup_type=$(grep "backup_type" "$backup_dir/xtrabackup_checkpoints" | cut -d'=' -f2 | tr -d ' ')
+    local from_lsn=$(grep "from_lsn" "$backup_dir/xtrabackup_checkpoints" | cut -d'=' -f2 | tr -d ' ')
+    local to_lsn=$(grep "to_lsn" "$backup_dir/xtrabackup_checkpoints" | cut -d'=' -f2 | tr -d ' ')
+    
+    echo "Informações do backup:"
+    echo "  Tipo: $backup_type"
+    echo "  LSN inicial: $from_lsn"
+    echo "  LSN final: $to_lsn"
+    
+    # Detecta quantidade de memória disponível para otimização
+    local total_memory_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo "4194304")
+    local memory_for_prepare=$((total_memory_kb / 4)) # Usa 25% da memória total
+    local memory_gb=$((memory_for_prepare / 1024 / 1024))
+    
+    # Mínimo 1GB, máximo 8GB
+    if [[ $memory_gb -lt 1 ]]; then
+        memory_gb=1
+    elif [[ $memory_gb -gt 8 ]]; then
+        memory_gb=8
+    fi
+    
+    echo "Usando ${memory_gb}GB de memória para preparação"
+    
+    # Detecta número de CPUs para paralelização
+    local cpu_cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "4")
+    local parallel_threads=$((cpu_cores > 8 ? 8 : cpu_cores)) # Máximo 8 threads
+    
+    echo "Usando $parallel_threads threads para preparação"
+    
+    # Cria log de preparação
+    local prepare_log="$TMP_DIR/xtrabackup_prepare.log"
+    echo "Log de preparação será salvo em: $prepare_log"
+    
+    # Executa preparação com parâmetros otimizados
+    echo "Iniciando preparação do backup..."
+    xtrabackup --prepare \
+               --target-dir="$backup_dir" \
+               --use-memory="${memory_gb}G" \
+               --parallel="$parallel_threads" \
+               --innodb-checksum-algorithm=crc32 \
+               --innodb-log-checksums=ON \
+               --innodb-undo-tablespaces=0 2>&1 | tee "$prepare_log"
+    
+    local prepare_result=${PIPESTATUS[0]}
+    
+    if [[ $prepare_result -ne 0 ]]; then
+        echo "Erro: Falha ao preparar o backup"
+        echo "Código de saída: $prepare_result"
+        echo "Log de erro salvo em: $prepare_log"
+        
+        # Mostra últimas linhas do log para diagnóstico
+        echo "Últimas linhas do log de erro:"
+        tail -20 "$prepare_log" 2>/dev/null || echo "Não foi possível ler o log"
+        
+        send_webhook "error" "Falha na preparação do backup" "Erro ao preparar backup com xtrabackup. Código: $prepare_result. Log: $prepare_log" "R003" "$BACKUP_FILE"
+        return 1
+    fi
+    
+    # Verifica se a preparação foi bem-sucedida
+    if grep -q "completed OK!" "$prepare_log"; then
+        echo "✓ Preparação concluída com sucesso"
+        
+        # Marca backup como preparado
+        touch "$backup_dir/.xtrabackup_prepared"
+        echo "$(date -Iseconds)" > "$backup_dir/.xtrabackup_prepared"
+        
+        # Verifica integridade dos arquivos principais após preparação
+        if [[ -f "$backup_dir/ibdata1" ]]; then
+            echo "✓ Arquivo ibdata1 encontrado após preparação"
+        else
+            echo "⚠ Aviso: Arquivo ibdata1 não encontrado após preparação"
+        fi
+        
+        return 0
+    else
+        echo "Erro: Preparação não foi concluída corretamente"
+        echo "Verifique o log: $prepare_log"
+        return 1
+    fi
 }
 
 # Função para restore do banco
 execute_restore() {
     echo "Executando restore do banco de dados..."
     
-    # Encontra diretório do backup
-    local backup_dir=$(find "$TMP_DIR" -type d -name "*-*-*_*-*-*" | head -n 1)
-    if [[ -z "$backup_dir" ]]; then
-        backup_dir=$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-        if [[ -z "$backup_dir" ]]; then
-            backup_dir="$TMP_DIR"
-        fi
-    fi
+    # Localiza o diretório correto do backup
+    local backup_dir=$(find_backup_directory "$TMP_DIR")
     
-    if [[ ! -d "$backup_dir" ]]; then
-        echo "Erro: Diretório de backup não encontrado"
+    if [[ -z "$backup_dir" ]]; then
+        echo "Erro: Não foi possível localizar o diretório do backup"
         return 1
     fi
     
     echo "Usando diretório de backup: $backup_dir"
     
-    # Detecta o formato do backup usando função do helpers.sh
-    local backup_format=$(detect_backup_format "$backup_dir")
+    # Detecta o tipo do backup
+    local backup_format=$(detect_backup_type "$backup_dir")
     
     if [[ "$backup_format" == "xtrabackup" ]]; then
         echo "Detectado backup do XtraBackup"
@@ -266,17 +447,8 @@ execute_restore() {
         
         # Etapa 1: Preparação do backup
         echo "Etapa 1/4: Preparando backup com xtrabackup..."
-        local prepare_log="$TMP_DIR/xtrabackup_prepare.log"
-        
-        xtrabackup --prepare --target-dir="$backup_dir" \
-                   --use-memory=1G \
-                   --parallel=4 2>&1 | tee "$prepare_log"
-        
-        local prepare_result=${PIPESTATUS[0]}
-        if [[ $prepare_result -ne 0 ]]; then
-            echo "Erro: Falha ao preparar o backup"
-            echo "Log de erro salvo em: $prepare_log"
-            send_webhook "error" "Falha na preparação do backup" "Erro ao preparar backup com xtrabackup. Verifique log: $prepare_log" "R003" "$BACKUP_FILE"
+        if ! prepare_xtrabackup_backup "$backup_dir"; then
+            echo "Erro: Falha na preparação do backup"
             return 1
         fi
         echo "✓ Backup preparado com sucesso"

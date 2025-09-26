@@ -6,7 +6,7 @@ Sistema inteligente de backup MySQL que suporta dois modos de operação: **loca
 
 - **Backup Híbrido**: Escolha entre backup físico (XtraBackup) ou lógico (mydumper)
 - **Detecção Automática**: Sistema detecta automaticamente o melhor método baseado na configuração
-- **Backup Incremental Inteligente**: Suporte completo para backups incrementais no modo local
+- **Backup Completo**: Backups completos confiáveis em ambos os modos
 - **Armazenamento em Nuvem**: Upload direto para Cloudflare R2 (compatível com S3)
 - **Sistema Modular**: Execução por etapas independentes com checkpoints automáticos
 - **Checkpoints Inteligentes**: Retomada automática de processos interrompidos
@@ -34,7 +34,7 @@ percona-backup-r2-package/
 - **Ferramenta**: Percona XtraBackup
 - **Tipo**: Backup físico (arquivos de dados)
 - **Vantagens**: 
-  - Backup incremental nativo
+  - Backup físico completo
   - Restauração mais rápida
   - Menor impacto no servidor durante backup
 - **Ideal para**: Servidores de produção, backups regulares
@@ -63,8 +63,8 @@ Todos os scripts principais (`backup.sh`, `restore.sh`, `cleanup.sh`) agora supo
 ./scripts/backup.sh --step compression # Apenas compressão
 ./scripts/backup.sh --step upload      # Apenas upload para R2
 
-# Para backups incrementais
-./scripts/backup.sh --step incremental # Backup incremental completo
+# Para backup completo
+./scripts/backup.sh full # Backup completo
 ```
 
 #### 🔄 Restore Modular
@@ -249,27 +249,15 @@ DB_NAME=analytics_db
 
 ## 🚀 Uso
 
-### Backup Automático
-O sistema detecta automaticamente se deve fazer backup full ou incremental:
+### Backup Completo
+O sistema executa sempre backup completo:
 
 ```bash
-# Execução automática (recomendado)
+# Execução padrão (recomendado)
 ./scripts/backup.sh
-```
 
-**Lógica Automática:**
-- **Domingo**: Sempre backup full
-- **Segunda a Sábado**: 
-  - Modo local: backup incremental
-  - Modo remoto: backup full (mydumper não suporta incremental)
-
-### Backup Explícito
-```bash
-# Forçar backup full
+# Ou explicitamente
 ./scripts/backup.sh full
-
-# Forçar backup incremental (apenas modo local)
-./scripts/backup.sh incremental
 
 # Executar apenas etapas específicas
 ./scripts/backup.sh --step backup      # Só backup
@@ -505,10 +493,6 @@ aws s3 ls s3://seu-bucket/ --endpoint-url=https://account-id.r2.cloudflarestorag
 aws configure list
 ```
 
-#### Backup Incremental Não Funciona
-- Verifique se está usando `BACKUP_MODE=local`
-- Confirme que existe um backup full anterior
-- Verifique logs para erros do XtraBackup
 
 #### Problemas com Checkpoints
 ```bash
@@ -602,7 +586,7 @@ echo "Sistema resetado - próxima execução será completa"
 |---------|-------------------------|------------------------|-----------------|
 | **Velocidade Backup** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
 | **Velocidade Restore** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
-| **Backup Incremental** | ✅ Nativo | ❌ Não suportado | ✅ Suportado |
+
 | **Paralelização** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
 | **Compressão** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
 | **Flexibilidade** | ⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |

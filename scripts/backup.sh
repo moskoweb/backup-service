@@ -32,7 +32,7 @@ for arg in "$@"; do
             SPECIFIC_STEP="${arg#*=}"
             shift
             ;;
-        full|incremental)
+        full)
             BACKUP_TYPE="$arg"
             shift
             ;;
@@ -40,8 +40,7 @@ for arg in "$@"; do
             echo "Uso: $0 [tipo_backup] [--step=etapa]"
             echo ""
             echo "Tipos de backup:"
-            echo "  full         Backup completo"
-            echo "  incremental  Backup incremental"
+            echo "  full         Backup completo (padrão e único suportado)"
             echo ""
             echo "Etapas disponíveis (--step):"
             echo "  database     Executa apenas backup do banco de dados"
@@ -52,7 +51,7 @@ for arg in "$@"; do
             echo "Exemplos:"
             echo "  $0 full                    # Backup completo com todas as etapas"
             echo "  $0 full --step=database    # Apenas backup do banco"
-            echo "  $0 incremental --step=upload # Apenas upload de backup incremental"
+            echo "  $0 --step=upload           # Apenas upload do backup"
             exit 0
             ;;
         *)
@@ -63,12 +62,7 @@ done
 
 # Define tipo de backup padrão se não especificado
 if [[ -z "$BACKUP_TYPE" ]]; then
-    DAY_OF_WEEK=$(date +%u)
-    if [[ "$DAY_OF_WEEK" -eq 7 ]]; then
-        BACKUP_TYPE="full"
-    else
-        BACKUP_TYPE="incremental"
-    fi
+    BACKUP_TYPE="full"
 fi
 
 # Define etapa padrão se não especificada
@@ -119,55 +113,43 @@ execute_database_backup() {
     
     local backup_success=1
     
-    if [[ "$BACKUP_TYPE" == "full" ]]; then
-        if [[ $use_mydumper -eq 1 ]]; then
-            backup_with_mydumper
-            backup_success=$?
-        else
-            # Backup completo usando xtrabackup
-            local backup_params=$(build_xtrabackup_params)
-            
-            if [[ -n "$backup_params" ]]; then
-                xtrabackup --backup \
-                    --user="$DB_USER" \
-                    --password="$DB_PASS" \
-                    --host="$DB_HOST" \
-                    --port="$DB_PORT" \
-                    --target-dir="$TMP_DIR" \
-                    $backup_params
-            else
-                xtrabackup --backup \
-                    --user="$DB_USER" \
-                    --password="$DB_PASS" \
-                    --host="$DB_HOST" \
-                    --port="$DB_PORT" \
-                    --target-dir="$TMP_DIR"
-            fi
-            backup_success=$?
-            
-            # Valida se o backup xtrabackup foi criado corretamente
-            if [[ $backup_success -eq 0 ]]; then
-                if [[ ! -f "$TMP_DIR/xtrabackup_checkpoints" ]]; then
-                    echo "Erro: Backup xtrabackup concluído mas arquivo xtrabackup_checkpoints não foi criado"
-                    echo "Conteúdo do diretório de backup:"
-                    ls -la "$TMP_DIR"
-                    backup_success=1
-                else
-                    echo "✓ Arquivo xtrabackup_checkpoints criado com sucesso"
-                fi
-            fi
-        fi
+    if [[ $use_mydumper -eq 1 ]]; then
+        echo "Executando backup completo com mydumper..."
+        backup_with_mydumper
+        backup_success=$?
     else
-        # Backup incremental
-        if [[ $use_mydumper -eq 1 ]]; then
-            echo "Aviso: Backup incremental não é suportado no modo remoto (mydumper)."
-            echo "Executando backup completo com mydumper..."
-            backup_with_mydumper
-            backup_success=$?
+        echo "Executando backup completo com xtrabackup..."
+        # Backup completo usando xtrabackup
+        local backup_params=$(build_xtrabackup_params)
+        
+        if [[ -n "$backup_params" ]]; then
+            xtrabackup --backup \
+                --user="$DB_USER" \
+                --password="$DB_PASS" \
+                --host="$DB_HOST" \
+                --port="$DB_PORT" \
+                --target-dir="$TMP_DIR" \
+                $backup_params
         else
-            # Lógica de backup incremental com xtrabackup
-            execute_incremental_backup
-            backup_success=$?
+            xtrabackup --backup \
+                --user="$DB_USER" \
+                --password="$DB_PASS" \
+                --host="$DB_HOST" \
+                --port="$DB_PORT" \
+                --target-dir="$TMP_DIR"
+        fi
+        backup_success=$?
+        
+        # Valida se o backup xtrabackup foi criado corretamente
+        if [[ $backup_success -eq 0 ]]; then
+            if [[ ! -f "$TMP_DIR/xtrabackup_checkpoints" ]]; then
+                echo "Erro: Backup xtrabackup concluído mas arquivo xtrabackup_checkpoints não foi criado"
+                echo "Conteúdo do diretório de backup:"
+                ls -la "$TMP_DIR"
+                backup_success=1
+            else
+                echo "✓ Arquivo xtrabackup_checkpoints criado com sucesso"
+            fi
         fi
     fi
     
@@ -282,83 +264,7 @@ execute_upload() {
     return 0
 }
 
-# Função para executar backup incremental
-execute_incremental_backup() {
-    echo "Executando backup incremental..."
-    
-    # Busca o backup completo mais recente no R2
-    local latest_full=$(aws s3 ls "s3://$S3_BUCKET/$S3_FOLDER/" --endpoint-url="$S3_ENDPOINT" --region="$S3_REGION" | \
-                       grep "full" | sort | tail -n 1 | awk '{print $4}')
-    
-    if [[ -z "$latest_full" ]]; then
-        echo "Aviso: Nenhum backup completo encontrado. Mudando para backup completo..."
-        BACKUP_TYPE="full"
-        execute_database_backup
-        return $?
-    fi
-    
-    echo "Usando backup base: $latest_full"
-    
-    # Baixa e extrai o backup base
-    local base_dir="$TMP_BACKUP_PATH/base-backup"
-    mkdir -p "$base_dir"
-    
-    local timeout=${TRANSFER_TIMEOUT:-300}
-    timeout "$timeout" aws s3 cp "s3://$S3_BUCKET/$S3_FOLDER/$latest_full" "$base_dir/$latest_full" --endpoint-url="$S3_ENDPOINT"
-    
-    if [[ $? -ne 0 ]]; then
-        echo "Erro: Falha ao baixar backup base do R2"
-        send_webhook "error" "Falha no backup do banco de dados" "Erro ao baixar backup base $latest_full do R2 para backup incremental" "B001" "$latest_full"
-        rm -rf "$base_dir"
-        return 1
-    fi
-    
-    # Extrai o backup base
-    tar -xzf "$base_dir/$latest_full" -C "$base_dir"
-    if [[ $? -ne 0 ]]; then
-        echo "Erro: Falha ao extrair backup base"
-        send_webhook "error" "Falha no backup do banco de dados" "Erro ao extrair backup base $latest_full para backup incremental" "B001" "$latest_full"
-        rm -rf "$base_dir"
-        return 1
-    fi
-    
-    # Encontra o diretório do backup extraído
-    local backup_base_dir=$(find "$base_dir" -type d -name "*-*-*_*-*-*" | head -n 1)
-    if [[ -z "$backup_base_dir" ]]; then
-        backup_base_dir="$base_dir"
-    fi
-    
-    # Executa backup incremental
-    local backup_params=$(build_xtrabackup_params)
-    
-    if [[ -n "$backup_params" ]]; then
-        xtrabackup --backup \
-            --user="$DB_USER" \
-            --password="$DB_PASS" \
-            --host="$DB_HOST" \
-            --port="$DB_PORT" \
-            --target-dir="$TMP_DIR" \
-            --incremental-basedir="$backup_base_dir" \
-            --datadir="$DB_DATA_DIR" \
-            $backup_params
-    else
-        xtrabackup --backup \
-            --user="$DB_USER" \
-            --password="$DB_PASS" \
-            --host="$DB_HOST" \
-            --port="$DB_PORT" \
-            --target-dir="$TMP_DIR" \
-            --incremental-basedir="$backup_base_dir" \
-            --datadir="$DB_DATA_DIR"
-    fi
-    
-    local result=$?
-    
-    # Remove diretório base temporário
-    rm -rf "$base_dir"
-    
-    return $result
-}
+# Todos os backups agora são full
 
 # Configurações de data e diretórios
 # Usa apenas a data (YYYY-MM-DD) para permitir múltiplas execuções no mesmo dia
@@ -376,7 +282,7 @@ if [[ -n "$DB_DATABASE" ]]; then
     SUFFIX="-${DB_DATABASE}"
 fi
 
-FILENAME="${PREFIX}${DATE}-${BACKUP_TYPE}${SUFFIX}.tar.gz"
+FILENAME="${PREFIX}${DATE}-full${SUFFIX}.tar.gz"
 ARCHIVE_PATH="$TMP_BACKUP_PATH/$FILENAME"
 
 echo "Criando backup em: $TMP_DIR"
@@ -525,28 +431,15 @@ USE_MYDUMPER=$?
 if [[ "$SPECIFIC_STEP" == "all" ]]; then
     # Executa todas as etapas necessárias
     
-    # 1. Backup do banco de dados
+    # 1. Backup do banco de dados (sempre full)
     if [[ "$SKIP_DATABASE_BACKUP" == "true" ]]; then
         echo "⏭ Pulando backup do banco (já concluído)"
     else
-        if [[ "$BACKUP_TYPE" == "full" ]]; then
-            execute_database_backup
-        else
-            # Backup incremental
-            if [[ $USE_MYDUMPER -eq 1 ]]; then
-                echo "Aviso: Backup incremental não é suportado no modo remoto (mydumper)."
-                echo "Executando backup completo com mydumper..."
-                execute_database_backup
-            else
-                execute_incremental_backup
-            fi
-        fi
-        
+        execute_database_backup
         if [[ $? -ne 0 ]]; then
             echo "Erro: Falha no backup do banco de dados"
             exit 1
         fi
-        
         save_checkpoint "backup" "$(date -Iseconds)"
     fi
     
@@ -579,24 +472,13 @@ else
     echo "Executando apenas a etapa: $SPECIFIC_STEP"
     
     case "$SPECIFIC_STEP" in
-        "backup")
-            if [[ "$BACKUP_TYPE" == "full" ]]; then
-                execute_database_backup
-            else
-                if [[ $USE_MYDUMPER -eq 1 ]]; then
-                    echo "Aviso: Backup incremental não é suportado no modo remoto (mydumper)."
-                    echo "Executando backup completo com mydumper..."
-                    execute_database_backup
-                else
-                    execute_incremental_backup
-                fi
-            fi
-            
+        "database")
+            execute_database_backup
             if [[ $? -eq 0 ]]; then
-                save_checkpoint "backup" "$(date -Iseconds)"
-                echo "✓ Backup concluído com sucesso!"
+                save_checkpoint "database_backup" "$(date -Iseconds)"
+                echo "✓ Backup do banco concluído com sucesso!"
             else
-                echo "✗ Falha no backup"
+                echo "✗ Falha no backup do banco"
                 exit 1
             fi
             ;;
