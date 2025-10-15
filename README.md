@@ -181,9 +181,7 @@ GRANT RELOAD, LOCK TABLES, PROCESS, REPLICATION CLIENT, BACKUP_ADMIN ON *.* TO '
 GRANT CREATE, INSERT, DROP, UPDATE ON mysql.backup_progress TO 'backup_user'@'localhost';
 
 -- Para modo remoto (mydumper) - adicionar também:
-GRANT SELECT ON *.* TO 'backup_user'@'localhost';
-GRANT SHOW VIEW ON *.* TO 'backup_user'@'localhost';
-GRANT TRIGGER ON *.* TO 'backup_user'@'localhost';
+GRANT SELECT, LOCK TABLES, EVENT, TRIGGER, SHOW VIEW, EXECUTE ON *.* TO 'backup_user'@'%';
 
 FLUSH PRIVILEGES;
 ```
